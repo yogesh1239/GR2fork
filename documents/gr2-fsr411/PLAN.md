@@ -174,6 +174,24 @@ Each phase lists what I do, what you do, how we know it is done, and a time esti
 
 **Time (my work):** 30 to 90 minutes, plus your 15 minutes of play.
 
+**Result so far (2026-10-05, one gameplay recording: Kat running across a bridge):**
+
+1. **Motion vectors: found, full size, usable.** The game writes them at 2560x1440. It does this even with the "Disable motion blur" patch on, so you can keep that patch.
+2. **Depth: found.** It goes in the direction that the model files expect. No extra step is needed.
+3. **The game's own smoothing pass: found.** It is an edge smoother (FXAA) plus a blend with the previous frame. FSR replaces this one step.
+4. **The step after it** copies the finished picture to the screen buffer. Menus would be drawn after that.
+5. **One weakness:** characters (Kat and the people in the city) have no motion vectors of their own. The game gives them "no motion". Kat moves with the camera, so that is mostly right for her. People who walk across the screen would leave short trails with FSR. **You decided this must be fixed (2026-10-05).** Phase 3b does it.
+
+6. **Jitter: the game does not jitter.** I read the camera numbers in 6 recordings. In every one, the camera is centred to within 0.0001 of a pixel. The game's smoothing step also has no jitter correction. So I add jitter myself in Phase 2.
+
+**Phase 1 is done (2026-10-05).** The third recording session (02:08 to 02:13) gave 32 frames. I pressed F12 every 5 seconds with a virtual keyboard while you played. They show:
+
+- the pause menu;
+- the health bar, the gravity gauge, mission text, subtitles and button hints (the UI, for job B);
+- people who move near Kat (for Phase 3b);
+- Kat falling and flying fast (large motion);
+- a comic panel and loading screens.
+
 ### Phase 2: General connection work (no game knowledge needed)
 
 I can do this phase at the same time as Phase 1.
@@ -194,6 +212,21 @@ I can do this phase at the same time as Phase 1.
 
 **Time (my work):** 1 to 3 hours.
 
+**Status (2026-10-05): built and tested by me. Only your short test is left.**
+
+- The program builds.
+- With FSR 4.1.1 on, the start-up check passed: "FSR 4.1.1: t2160_m0 output 2560x1440 fp8", then "self-test at 2560x1440: passed". The game then ran for 26 seconds with no errors.
+- FSR does not change the picture yet. Phase 3 connects it to the game.
+
+1. Done: I copied the FSR 4.1.1 code from the Bloodborne port with no changes.
+2. Done: the program now turns on the graphics card features that FSR 4.1.1 FP8 needs, when the card has them.
+3. Done: two new settings, "FSR 4.1.1 anti-aliasing" (on/off) and "Sharpness" (0 to 100). Both are in the in-game menu (Ctrl+F10, Display, FSR 4.1.1). You can switch FSR on and off while you play, to compare.
+4. Done: I copied the model files into the test folder (2.8 MB). The originals stay where they are.
+5. Done: a start-up check. When the setting is on, the program runs FSR 4.1.1 one time on empty pictures at the window size. The log then says "FSR 4.1.1 self-test at 2560x1440: passed" or "failed". If it fails, FSR stays off and the game keeps its own smoothing.
+6. Moved to Phase 3: the jitter. It must shift exactly the same drawing steps that FSR later reads, so I write it together with the connection in Phase 3.
+7. Not done (not needed now): the Big Picture settings screen. The Ctrl+F10 menu is enough for testing.
+8. Before the first new build, I kept a copy of the Phase 0 program (`build/shadps4.phase0`). With it, we can compare the new program with the old one.
+
 ### Phase 3: Job A, FSR 4.1.1 as anti-aliasing at full size
 
 **What I do:**
@@ -209,6 +242,30 @@ I can do this phase at the same time as Phase 1.
 **Done when:** edges look cleaner and more stable than with FSR off, without obvious trails, and the speed is about the same.
 
 **Time (my work):** 2 to 6 hours. Add 3 to 8 hours if I must make my own motion vectors.
+
+### Phase 3b: Motion vectors for characters (required)
+
+The game draws Kat and the people in the city in a separate step, and that step makes no motion vectors. So I make them myself.
+
+**How it works:**
+
+1. On each frame, the emulator saves where every corner point of each character was drawn on screen.
+2. On the next frame, it draws each character once more into a hidden picture. For each pixel it writes "where this point was last frame, minus where it is now". That is exactly a motion vector.
+3. This covers walking, running, arm and leg movement, and hair and cloth, because it uses the final positions of the points after all animation.
+4. I put these character motion vectors on top of the game's own motion vectors. Then I give the combined picture to FSR.
+
+Your Bloodborne port already does the same thing for Bloodborne's characters. I reuse its method, but I must adapt it to Gravity Rush 2 and to the newer emulator code.
+
+**What you do:** test scenes with people walking across the screen and Kat running past the camera. Tell me if trails remain.
+
+**Done when:** people walking across the screen leave no visible trails with FSR on.
+
+**Time (my work):** 4 to 10 hours.
+
+**Risks:**
+
+- Characters that appear or disappear (for example after a camera cut) have no "last frame". For one frame they get no motion. FSR handles single frames like this well.
+- Objects drawn in an unusual way (for example particles or some effects) may still have no motion. I check this with recordings after the fix.
 
 ### Phase 4: Job B, real upscaling
 
@@ -325,6 +382,43 @@ I can do this phase at the same time as Phase 1.
   6. Projection constants across 2 consecutive frames (jitter).
   7. Scene color format (R11G11B10F vs RGBA16F) and the first UI draw hash.
 
+### Phase 1 results (capture `GR2fork-FSR4-test/user/captures/CUSA03694_capture_3.rdc`, 1440p patch, base mode)
+
+Analysis is headless: `qrenderdoc --python <script>` on the normal display (`QT_QPA_PLATFORM=offscreen` hangs before the script runs). The Arch package ships no standalone Python module. Scripts are in `documents/gr2-fsr411/rdc/`. Run them with `RDC_OUT=<out.txt> RDC_CAP=<file.rdc> qrenderdoc --python <script>` (`jitter.py` takes `RDC_CAPS`, a comma list; `cbuf.py` takes `RDC_EVENTS`). Shader modules have no names, so passes were identified by targets, formats and order.
+
+| Event | Pass | Notes |
+|---|---|---|
+| 8797-8836 | depth prepass | D32S8 `T2192` 2560x1440 |
+| 8849-14345 | G-buffer | RT0 RGBA8 sRGB (albedo), RT1 RG16F `T2280` (normals), RT2 RGBA8, RT3 RG16F `T2223` (velocity; most draws write it) |
+| 14443-14742 | forward-shaded draws (characters) into HDR `T2337` RGBA16F | write no velocity |
+| 14748-14768 | linear depth R32F `T2215` + 5-level min chain | |
+| 14773 | camera-motion compute | reads D32S8 + R32F, writes `T2223` |
+| 14778/14783 | temporal lighting accumulation | R11G11B10 ping-pong `T2281/2282`, `T2293/2294`, reads velocity |
+| 14788-14798 | deferred lighting, composite into HDR `T2337` | |
+| 14888-15014 | fog (160x90 volume) into HDR `T2320`, transparents, refraction | |
+| 15028-15052 | bloom at 640x360 (R11G11B10) | |
+| 15058-15072 | motion-blur prep: RG8 compressed velocity, 64x60 tile/neighbour max | the blur itself is skipped by the patch |
+| 15081 | tonemap: HDR `T2320` + bloom -> sRGB `T2366` | |
+| **15087** | **game AA (compute): FXAA + history blend** | reads `T2366`, stencil, velocity `T2223`, history `T2375`; writes `T2374` (ping-pong) |
+| 15094 | copy `T2374` -> VideoOut buffer `T2155` (R8G8B8A8_SRGB 2560x1440) | |
+| 15105-15138 | 640x360 RGBA8 chain, blended into `T2155` | overlay; no HUD visible in this frame |
+| 15148 | presenter `post_process.frag` | |
+
+- **Velocity encoding** (from the AA shader's SPIR-V): `history_px = (px + 0.5) + 0.5*W*v.x`, `history_py = (py + 0.5) - 0.5*H*v.y`. So `v` is previous minus current in NDC with y up. In FSR terms (previous minus current, render pixels, y down): `motion_scale = (0.5*W, -0.5*H)`. No conversion pass is needed.
+  - The AA uses history only where stencil bit `0x8` is set (static geometry) and motion is 16 px or less.
+  - Character pixels hold exactly `(0, 0)`.
+- **Velocity statistics:** |x| p99 0.0077, |y| p99 0.061 NDC (y = 0.058 at the bottom centre, about 42 px). This is plausible for forward running, but there is no second frame to confirm the scale.
+- **Depth:** standard Z. The sky clears to 1.0; values are 0.973-0.997 from near to far. This matches assets captured without `DEPTH_INVERTED`.
+- **Insertion point for job A:** replace dispatch 15087.
+  - Input color: LDR `T2366`, or HDR `T2320` before bloom and tonemap.
+  - Depth `T2192`, motion `T2223` with the scale above.
+  - Output into `T2374`, so the copy at 15094 picks it up.
+- **Job B:** the VideoOut buffer (`T2155`) gets the AA output (15094) plus overlays. The DLSS project's HUD-difference composite applies: pre-HUD = `T2374`, final = `T2155` at flip.
+- **Jitter: none, confirmed on 6 frames.** G-buffer draws have WorldView (bytes 0-63), WorldViewProj (64-127) and PrevWorldViewProj (128-191) in their VS buffer. `P = inverse(WV) * WVP` gives `|P[2][0]|*1280` and `|P[2][1]|*720` below 0.0001 px in capture 3 (event 8849) and in session-3 captures 4, 7, 17, 25 and 31 (script `rdc/jitter.py`). The vertical FOV changes with gameplay (`P11` 2.0965 to 2.8050). The camera-motion compute (14773) gets the same centred projection. The AA shader has no unjitter term.
+- **Projection form:** row vectors, `P22 = -1.00002`, `P32 = -0.2`, `P23 = -1`.
+- **Captures kept** (`GR2fork-FSR4-test/user/captures/`, not in git): `gr2_bridge_kat.rdc` (the Phase 1 results above), `gr2_city_people_subtitle.rdc`, and session 3 `CUSA03694_capture_2..32.rdc` (34 GB in total). Useful ones: 2-3 pause menu; 4, 5, 11, 12, 25, 26, 30-32 HUD (health, gravity gauge, mission text); 7-10 moving NPCs with subtitles; 26, 28 button prompts; 22 comic panel; 13, 20, 21 black loading (21 has a subtitle on black); 25-32 fast falling.
+- **HUD draw order:** to analyse for Phase 4 from captures 2, 11 and 26.
+
 ### Phase 2 details
 
 - **Copy** `fsr411/fsr411.{h,cpp}` to `src/video_core/renderer_vulkan/fsr411/`. Add it to the `CMakeLists.txt` source list (around line 1174).
@@ -348,6 +442,15 @@ I can do this phase at the same time as Phase 1.
   - Sequence: Halton(2,3) with phases `clamp(ceil(8·(out/render)²), 8, 256)` (bbport `motion_history.h:206`).
   - Selection: scene-depth draws that are not full-screen (bbport rasterizer 1087-1090, 1215-1216). Check this rule again for GR2.
 - **Assets:** copy `Bloodborne PC/fsr4_411_fp8/*` to `GR2fork-FSR4-test/user/fsr4_411/`.
+- **Size check done:** `fsr411.cpp` takes any output up to 3840x2160 (`rw <= ow`). Above 1920x1080 it uses the t2160 tier; dispatch counts and the tensor table come from the output size aligned to 8. bbport commit f555009 verified FP8 bit-exact against the DLL at 1440p and ran 1707x960 -> 2560x1440 in game at 0.79-0.89 ms. Native ratio (1440p -> 1440p) is untested but is not restricted.
+- **As built (2026-10-05):**
+  - `src/video_core/renderer_vulkan/fsr411/fsr411.{h,cpp}`: copied unchanged from bbport.
+  - It calls global Vulkan functions, while the emulator uses the dynamic dispatcher (`VK_NO_PROTOTYPES` in `vk_common.h`). Fix: `shadps4` links `vulkan` (libvulkan.so.1, the same library the dispatcher opens). Linux only.
+  - `vk_instance`: the 4 extensions and their features are optional and unlinked when missing (RenderDoc may hide them). Getter `IsFsr411Fp8Supported()`. `enabled_extensions` grew from 32 to 40.
+  - `vk_fsr411_pass.{h,cpp}`: `Fsr411Pass`, owned by `Rasterizer`. `Record()` waits for the frame 8 frames back with scheduler ticks, ends rendering, records into the scheduler's command buffer, and logs `Describe()`. An "unsupported size" error is transient; any other error disables FSR for the session. `SelfTest(w, h)` creates scratch RGBA16F/D32/RG16F/RGBA16F images (VMA), records one reset frame and calls `scheduler.Finish()`. It runs in the `Rasterizer` constructor when `fsr411_enabled` is set, at the configured window size.
+  - Settings `fsr411_enabled` (bool) and `fsr411_sharpness` (0-100) at the end of `GPU_SETTINGS_JSON_FIELDS_B` (47 of 63 names). Menu: `core/devtools/layer.cpp`, Display > FSR 4.1.1 (live toggle, Save).
+  - Assets dir: `<user>/fsr4_411` (copied, 2.8 MB).
+  - Jitter: deferred to Phase 3. Rule: jitter draws whose depth attachment is the scene depth (`T2192` in capture 3) at scene size. That covers the prepass, G-buffer, forward characters and transparents, but not shadows, the fog volume, bloom, the overlay chain, the 64x60 tile pass or the HUD. Check the G-buffer depth compare op first: EQUAL against the prepass means all scene-depth passes need the same offset.
 
 ### Phase 3 details
 
@@ -373,6 +476,19 @@ I can do this phase at the same time as Phase 1.
 - **HUD:** `bb_dlss_composite.comp` computes `upscaled + (final_with_HUD - pre_HUD_snapshot)` (bilinear, render size), optional RCAS, and the game's display LUT at output size.
 - **Bloodborne-specific constants** (`vk_bb_temporal_dlss.cpp:73-84`): DepthProducer `0xd3c8bb21`, DisplayCopy `0x38d65b32`, velocity shaders `0x34bc187c`/`0x749e4f9e`/`0xb25e4fae`, and the Scaleform HUD VS list. GR2 equivalents come from Phase 1.
 - **Camera motion:** built from scene constants in double precision. The game's own float32 reprojection matrix had about 0.6 px noise, which made DLSS shimmer. Watch for the same problem with GR2's `u_m4InversePrevProj` pass.
+
+### Phase 3b details (character object motion)
+
+- **Targets:** forward-shaded draws into the HDR target with scene depth (events 14443-14742 in capture 3, 64 draws) write no velocity. The camera-motion compute (14773) leaves `(0, 0)` where stencil bit `0x8` is clear.
+- **Method:** port bbport's ObjectMotion.
+  - Recompiler variant of the draw's VS: store clip positions per vertex into a positions buffer, read the previous frame's positions.
+  - The fragment shader writes previous minus current.
+  - Draws are matched across frames by key (streams, shader, index hash and range, instance, order).
+  - bbport files: `vk_object_motion.*`, `motion_history.h`, `runtime_info.h` 81-115/230, `spirv_emit_context.*`, `emit_spirv_special.cpp` +126, `vk_pipeline_cache.cpp` 507-635.
+  - EXODUS's recompiler moved 73 commits past b4e7ae7, so expect manual merging.
+- **Selection for GR2:** replace bbport's bone-palette `ClassifyBuffer` with a target-based rule: color = HDR scene target, depth = scene depth, not full-screen, not blended. Check whether the G-buffer skinned draws (which have `u_m4PrevWorldViewProj` but one skin palette) also need it for limb motion.
+- **Output:** a separate RG16F object-motion target plus coverage, merged over `T2223` before FSR. This is the DLSS project's "velocity mirror" merge idea. Units: render pixels, previous minus current, y down; or NDC to match the game buffer, then use one `motion_scale`.
+- **Draw matching fallback:** an unmatched draw writes nothing, so camera motion remains.
 
 ### Phase 4 details
 
@@ -406,6 +522,7 @@ I can do this phase at the same time as Phase 1.
 | 0 Baseline build + test copy | 30-60 min |
 | 1 RenderDoc investigation | 30-90 min + 15 min user play |
 | 2 Generic plumbing | 1-3 h |
-| 3 Native AA (job A) | 2-6 h (+3-8 h if own motion vectors are needed) |
+| 3 Native AA (job A) | 2-6 h |
+| 3b Character motion vectors (required) | 4-10 h |
 | 4 Upscaling (job B) | 2-5 h (HUD-difference method) |
 | 5 Finish | ~1 h |

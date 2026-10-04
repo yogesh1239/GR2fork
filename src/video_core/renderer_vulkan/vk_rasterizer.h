@@ -9,6 +9,7 @@
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/vk_fsr411_pass.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/skipcache/skipcache.h"
@@ -441,6 +442,7 @@ private:
     // Generation for IsMapped's per-thread interval cache.
     std::atomic<u64> mapped_ranges_gen_{0};
     PipelineCache pipeline_cache;
+    Fsr411Pass fsr411_pass;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

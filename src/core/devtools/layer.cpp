@@ -124,6 +124,21 @@ void L::DrawMenuBar() {
 
                 ImGui::EndMenu();
             }
+            if (BeginMenu("FSR 4.1.1")) {
+                bool fsr411 = EmulatorSettings.IsFsr411Enabled();
+                if (Checkbox("Anti-aliasing (replaces the game's)", &fsr411)) {
+                    EmulatorSettings.SetFsr411Enabled(fsr411);
+                }
+                int sharpness = EmulatorSettings.GetFsr411Sharpness();
+                if (SliderInt("Sharpness", &sharpness, 0, 100)) {
+                    EmulatorSettings.SetFsr411Sharpness(sharpness);
+                }
+                if (Button("Save")) {
+                    EmulatorSettings.Save();
+                    CloseCurrentPopup();
+                }
+                ImGui::EndMenu();
+            }
             ImGui::EndMenu();
         }
         if (BeginMenu("Debug")) {

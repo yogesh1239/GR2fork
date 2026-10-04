@@ -713,6 +713,8 @@ struct GPUSettings {
     Setting<bool> fsr_enabled{false};
     Setting<bool> rcas_enabled{true};
     Setting<int> rcas_attenuation{250};
+    Setting<bool> fsr411_enabled{false};
+    Setting<int> fsr411_sharpness{0};
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
 
@@ -730,6 +732,8 @@ struct GPUSettings {
             make_override<GPUSettings>("fsr_enabled", &GPUSettings::fsr_enabled),
             make_override<GPUSettings>("rcas_enabled", &GPUSettings::rcas_enabled),
             make_override<GPUSettings>("rcas_attenuation", &GPUSettings::rcas_attenuation),
+            GPU_OVERRIDE(fsr411_enabled),
+            GPU_OVERRIDE(fsr411_sharpness),
             make_override<GPUSettings>("dump_shaders", &GPUSettings::dump_shaders),
             make_override<GPUSettings>("patch_shaders", &GPUSettings::patch_shaders),
             make_override<GPUSettings>("readbacks_mode", &GPUSettings::readbacks_mode),
@@ -845,7 +849,7 @@ struct GPUSettings {
     vertex_layout_memo, covered_range_skip, residency_bitmap, \
     readback_linear_images_async, inline_fetch_shader, stream_barrier_skip, \
     clean_sync_peek, readback_offload, vk_record_thread, vk_record_kick_kb, \
-    upload_repeat_probe, upload_dedup
+    upload_repeat_probe, upload_dedup, fsr411_enabled, fsr411_sharpness
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1229,6 +1233,8 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, FsrEnabled, fsr_enabled)
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
+    SETTING_FORWARD_BOOL(m_gpu, Fsr411Enabled, fsr411_enabled)
+    SETTING_FORWARD(m_gpu, Fsr411Sharpness, fsr411_sharpness)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesAsync, readback_linear_images_async)

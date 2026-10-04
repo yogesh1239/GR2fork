@@ -211,7 +211,11 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR>();
+        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
+        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
+        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR,
+        vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -229,7 +233,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 40> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -355,6 +359,21 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
+    compute_shader_derivatives = add_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    if (compute_shader_derivatives) {
+        compute_shader_derivatives_features =
+            feature_chain.get<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
+    }
+    mixed_float_dot_product =
+        feature_chain.get<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>()
+            .shaderMixedFloatDotProductFloat16AccFloat32 &&
+        add_extension(VK_VALVE_SHADER_MIXED_FLOAT_DOT_PRODUCT_EXTENSION_NAME);
+    cooperative_matrix =
+        feature_chain.get<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>().cooperativeMatrix &&
+        add_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    const auto float8_features = feature_chain.get<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
+    shader_float8 = float8_features.shaderFloat8 && float8_features.shaderFloat8CooperativeMatrix &&
+                    add_extension(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -418,6 +437,8 @@ bool Instance::CreateDevice() {
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
+                .shaderStorageImageWriteWithoutFormat =
+                    features.shaderStorageImageWriteWithoutFormat,
                 .shaderClipDistance = features.shaderClipDistance,
                 .shaderFloat64 = features.shaderFloat64,
                 .shaderInt64 = features.shaderInt64,
@@ -444,14 +465,17 @@ bool Instance::CreateDevice() {
             .hostQueryReset = vk12_features.hostQueryReset,
             .timelineSemaphore = vk12_features.timelineSemaphore,
             .bufferDeviceAddress = vk12_features.bufferDeviceAddress,
+            .vulkanMemoryModel = vk12_features.vulkanMemoryModel,
             .shaderOutputLayer = vk12_features.shaderOutputLayer,
         },
         vk::PhysicalDeviceVulkan13Features{
             .robustImageAccess = vk13_features.robustImageAccess,
             .shaderDemoteToHelperInvocation = vk13_features.shaderDemoteToHelperInvocation,
             .subgroupSizeControl = vk13_features.subgroupSizeControl,
+            .computeFullSubgroups = vk13_features.computeFullSubgroups,
             .synchronization2 = vk13_features.synchronization2,
             .dynamicRendering = vk13_features.dynamicRendering,
+            .shaderIntegerDotProduct = vk13_features.shaderIntegerDotProduct,
             .maintenance4 = vk13_features.maintenance4,
         },
         // Extensions
@@ -531,6 +555,22 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
         },
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR{
+            .computeDerivativeGroupQuads =
+                compute_shader_derivatives_features.computeDerivativeGroupQuads,
+            .computeDerivativeGroupLinear =
+                compute_shader_derivatives_features.computeDerivativeGroupLinear,
+        },
+        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
+            .shaderMixedFloatDotProductFloat16AccFloat32 = true,
+        },
+        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR{
+            .cooperativeMatrix = true,
+        },
+        vk::PhysicalDeviceShaderFloat8FeaturesEXT{
+            .shaderFloat8 = true,
+            .shaderFloat8CooperativeMatrix = true,
+        },
     };
 
     if (!custom_border_color) {
@@ -584,6 +624,18 @@ bool Instance::CreateDevice() {
     }
     if (!shader_clock) {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
+    }
+    if (!compute_shader_derivatives) {
+        device_chain.unlink<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
+    }
+    if (!mixed_float_dot_product) {
+        device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
+    }
+    if (!cooperative_matrix) {
+        device_chain.unlink<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
+    }
+    if (!shader_float8) {
+        device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
