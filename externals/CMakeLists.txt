@@ -87,7 +87,7 @@ endif()
 if (NOT TARGET Vulkan::Headers)
     set(VULKAN_HEADERS_ENABLE_MODULE OFF)
     add_subdirectory(vulkan-headers)
-    set(VulkanHeaders_VERSION "1.4.330")
+    set(VulkanHeaders_VERSION "1.4.357")
 endif()
 
 # VMA
