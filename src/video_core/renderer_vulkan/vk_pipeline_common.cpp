@@ -440,6 +440,46 @@ SHAD_FORCE_INLINE void PushSet(vk::CommandBuffer cmdbuf, bool direct,
     }
 }
 
+// Pushes through the scheduler. Deferred, the writes and the infos they point to are copied
+// into the recording chunk with the pointers aimed at the copies: the caller reuses its lists.
+void RecordPushSet(Scheduler& scheduler, bool direct, vk::ShaderStageFlags stage_flags,
+                   vk::PipelineLayout layout, vk::PipelineBindPoint bind_point, u32 count,
+                   const vk::WriteDescriptorSet* writes) {
+    if (!scheduler.IsRecordingDeferred()) {
+        PushSet(scheduler.CommandBuffer(), direct, stage_flags, layout, bind_point, count, writes);
+        return;
+    }
+    size_t bytes = count * sizeof(vk::WriteDescriptorSet) + 64;
+    for (u32 i = 0; i < count; ++i) {
+        bytes +=
+            writes[i].descriptorCount * (sizeof(vk::DescriptorBufferInfo) +
+                                         sizeof(vk::DescriptorImageInfo) + sizeof(vk::BufferView)) +
+            32;
+    }
+    scheduler.ReserveRecordData(bytes);
+    const auto copied = scheduler.RecordData(std::span{writes, count});
+    auto* patched = const_cast<vk::WriteDescriptorSet*>(copied.data());
+    for (u32 i = 0; i < count; ++i) {
+        auto& write = patched[i];
+        if (write.pBufferInfo) {
+            write.pBufferInfo =
+                scheduler.RecordData(std::span{write.pBufferInfo, write.descriptorCount}).data();
+        }
+        if (write.pImageInfo) {
+            write.pImageInfo =
+                scheduler.RecordData(std::span{write.pImageInfo, write.descriptorCount}).data();
+        }
+        if (write.pTexelBufferView) {
+            write.pTexelBufferView =
+                scheduler.RecordData(std::span{write.pTexelBufferView, write.descriptorCount})
+                    .data();
+        }
+    }
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        PushSet(cmdbuf, direct, stage_flags, layout, bind_point, count, copied.data());
+    });
+}
+
 } // namespace
 
 // Out of line and externally linked: the header's inline Next() calls it from
@@ -511,7 +551,6 @@ Pipeline::~Pipeline() {
 void Pipeline::BindResources(std::span<vk::WriteDescriptorSet> set_writes,
                              const Shader::PushData& push_data, u32 buffer_info_n,
                              u32 image_info_n) const {
-    const auto cmdbuf = scheduler.CommandBuffer();
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
 
@@ -555,19 +594,22 @@ void Pipeline::BindResources(std::span<vk::WriteDescriptorSet> set_writes,
         }
     }
     if (!push_same) {
-        if (direct_push) {
-            const vk::PushConstantsInfo info{
-                .pNext = nullptr,
-                .layout = pipeline_layout,
-                .stageFlags = stage_flags,
-                .offset = 0u,
-                .size = sizeof(push_data),
-                .pValues = &push_data,
-            };
-            cmdbuf.pushConstants2(info);
-        } else {
-            cmdbuf.pushConstants(pipeline_layout, stage_flags, 0u, sizeof(push_data), &push_data);
-        }
+        scheduler.Record([direct = direct_push, layout = pipeline_layout, stage_flags,
+                          push_data](vk::CommandBuffer cmdbuf) {
+            if (direct) {
+                const vk::PushConstantsInfo info{
+                    .pNext = nullptr,
+                    .layout = layout,
+                    .stageFlags = stage_flags,
+                    .offset = 0u,
+                    .size = sizeof(push_data),
+                    .pValues = &push_data,
+                };
+                cmdbuf.pushConstants2(info);
+            } else {
+                cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
+            }
+        });
     }
 
     // Bind descriptor set.
@@ -712,8 +754,8 @@ void Pipeline::BindResources(std::span<vk::WriteDescriptorSet> set_writes,
                     ++slot.split;
                 }
             }
-            PushSet(cmdbuf, direct_push, stage_flags, pipeline_layout, bind_point, push_count,
-                    push_writes);
+            RecordPushSet(scheduler, direct_push, stage_flags, pipeline_layout, bind_point,
+                          push_count, push_writes);
             if (timed_miss) {
                 ctr.miss_ns += sc.CorrectSample(sc.Now() - m0);
                 ++ctr.miss_samples;
@@ -742,8 +784,8 @@ void Pipeline::BindResources(std::span<vk::WriteDescriptorSet> set_writes,
             }
             return;
         }
-        PushSet(cmdbuf, direct_push, stage_flags, pipeline_layout, bind_point,
-                static_cast<u32>(set_writes.size()), set_writes.data());
+        RecordPushSet(scheduler, direct_push, stage_flags, pipeline_layout, bind_point,
+                      static_cast<u32>(set_writes.size()), set_writes.data());
         return;
     }
 
@@ -776,7 +818,9 @@ void Pipeline::BindResources(std::span<vk::WriteDescriptorSet> set_writes,
         vk::ArrayProxy<const vk::WriteDescriptorSet>(static_cast<uint32_t>(set_writes.size()),
                                                      set_writes.data()),
         {});
-    cmdbuf.bindDescriptorSets(bind_point, pipeline_layout, 0, desc_set, {});
+    scheduler.Record([bind_point, layout = pipeline_layout, desc_set](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindDescriptorSets(bind_point, layout, 0, desc_set, {});
+    });
     // The heap set replaces this bind point's set 0 behind the delta cache;
     // the bump makes its next probe miss.
     sc.BumpForeignPushGen(idx);

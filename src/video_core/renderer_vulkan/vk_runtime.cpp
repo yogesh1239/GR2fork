@@ -769,8 +769,18 @@ void Runtime::FlushBarriers() {
     }
 
     scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.pipelineBarrier2(dep_info);
+    scheduler.ReserveRecordData(image_barriers.size() * sizeof(vk::ImageMemoryBarrier2));
+    const auto images = scheduler.RecordData(
+        std::span<const vk::ImageMemoryBarrier2>{image_barriers.data(), image_barriers.size()});
+    scheduler.Record([memory = memory_barrier, memory_count = dep_info.memoryBarrierCount,
+                      images](vk::CommandBuffer cmdbuf) {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = memory_count,
+            .pMemoryBarriers = &memory,
+            .imageMemoryBarrierCount = static_cast<u32>(images.size()),
+            .pImageMemoryBarriers = images.data(),
+        });
+    });
 
     memory_barrier.srcStageMask = vk::PipelineStageFlagBits2::eNone;
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;

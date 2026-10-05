@@ -1970,6 +1970,10 @@ void TextureCache::GarbageCollectSamplers() {
             return true;
         }
         --num_deletions;
+        // The erase destroys the sampler at once: queued commands may still name it.
+        if (!erased) {
+            scheduler.SyncRecording();
+        }
         sampler_lru_cache.Free(sampler);
         samplers.erase(sampler.hash);
         const auto sampler_id = slot_samplers.GetSlotId(sampler);

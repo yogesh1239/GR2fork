@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/assert.h"
+#include "common/cpu_pause.h"
 #include "common/debug.h"
 #include "common/rdtsc.h"
 #include "common/thread.h"
@@ -16,18 +19,36 @@ namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
-Scheduler::Scheduler(const Instance& instance)
+Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
     pop_poll_throttle_ = std::max<u32>(EmulatorSettings.GetPendingPopThrottle(), 1u);
     BeginSession();
+    if (threaded_recording) {
+        recorder_kick_bytes = size_t{std::max(EmulatorSettings.GetVkRecordKickKb(), 1u)} * 1024;
+        record_chunk = AcquireChunk();
+        recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
+        // Self-check before any game command: chunk overflow, hand-over, execution, recycling.
+        u32 ran = 0;
+        for (u32 i = 0; i < 10000; ++i) {
+            Record([&ran](vk::CommandBuffer) { ++ran; });
+        }
+        SyncRecording();
+        ASSERT_MSG(ran == 10000, "Recording thread self-check: {} of 10000 commands ran", ran);
+    }
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
 }
 
 Scheduler::~Scheduler() {
+    if (recorder_thread.joinable()) {
+        SyncRecording();
+        recorder_thread.request_stop();
+        recorder_cv.notify_all();
+        recorder_thread.join();
+    }
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
@@ -81,20 +102,25 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
                                          vk::ClearDepthStencilValue{.stencil = db.clear_value[1]}},
     };
 
-    const vk::RenderingInfo rendering_info = {
-        .renderArea =
-            {
-                .offset = {0, 0},
-                .extent = {render_state.width, render_state.height},
-            },
-        .layerCount = render_state.num_layers,
-        .colorAttachmentCount = render_state.num_color_attachments,
-        .pColorAttachments = color_attachments.data(),
-        .pDepthAttachment = db.has_depth ? &depth_attachment : nullptr,
-        .pStencilAttachment = db.has_stencil ? &stencil_attachment : nullptr,
-    };
-
-    CommandBuffer().beginRendering(rendering_info);
+    Record([color_attachments, depth_attachment, stencil_attachment,
+            extent = vk::Extent2D{render_state.width, render_state.height},
+            num_layers = render_state.num_layers,
+            num_color_attachments = render_state.num_color_attachments, has_depth = db.has_depth,
+            has_stencil = db.has_stencil](vk::CommandBuffer cmdbuf) {
+        const vk::RenderingInfo rendering_info = {
+            .renderArea =
+                {
+                    .offset = {0, 0},
+                    .extent = extent,
+                },
+            .layerCount = num_layers,
+            .colorAttachmentCount = num_color_attachments,
+            .pColorAttachments = color_attachments.data(),
+            .pDepthAttachment = has_depth ? &depth_attachment : nullptr,
+            .pStencilAttachment = has_stencil ? &stencil_attachment : nullptr,
+        };
+        cmdbuf.beginRendering(rendering_info);
+    });
 }
 
 void Scheduler::EndRendering() {
@@ -102,7 +128,7 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
-    CommandBuffer().endRendering();
+    Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 
 vk::CommandBuffer Scheduler::UploadCommandBuffer() {
@@ -223,6 +249,7 @@ void Scheduler::EndSession() {
     }
 
     EndRendering();
+    SyncRecording();
     Check(session.primary.end());
 }
 
@@ -303,6 +330,157 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     PopPendingOperations();
 }
 
+std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
+    std::scoped_lock lk{recorder_mutex};
+    if (free_chunks.empty()) {
+        // The storage is written before it is read: zeroing 128 KiB would buy nothing.
+        return std::make_unique_for_overwrite<RecordChunk>();
+    }
+    auto chunk = std::move(free_chunks.back());
+    free_chunks.pop_back();
+    return chunk;
+}
+
+void Scheduler::NextRecordChunk() {
+    full_chunks.push_back(std::move(record_chunk));
+    record_chunk = AcquireChunk();
+}
+
+void Scheduler::KickRecording(bool force) {
+    if (!recorder_thread.joinable()) {
+        return;
+    }
+    // Callers kick where nobody holds the raw command buffer: deferral resumes.
+    direct_mode = false;
+    // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
+    if (!force && full_chunks.empty() && record_chunk->Size() < recorder_kick_bytes) {
+        return;
+    }
+    if (full_chunks.empty() && record_chunk->Empty()) {
+        return;
+    }
+    ++(force ? recorder_forced_ : recorder_kicks_);
+    const vk::CommandBuffer target = sessions.back().primary;
+    bool wake;
+    {
+        std::scoped_lock lk{recorder_mutex};
+        for (auto& chunk : full_chunks) {
+            chunk->target = target;
+            recorder_queue.push_back(std::move(chunk));
+            ++handed_chunks_;
+        }
+        if (!record_chunk->Empty()) {
+            record_chunk->target = target;
+            recorder_queue.push_back(std::move(record_chunk));
+            ++handed_chunks_;
+            // The replacement comes from the same critical section: one lock per hand-over.
+            if (!free_chunks.empty()) {
+                record_chunk = std::move(free_chunks.back());
+                free_chunks.pop_back();
+            }
+        }
+        wake = recorder_sleeping;
+        queued_chunks.store(recorder_queue.size(), std::memory_order_release);
+    }
+    full_chunks.clear();
+    // A busy recorder picks the new chunks up by itself: waking it is a syscall per draw.
+    if (wake) {
+        recorder_cv.notify_one();
+    }
+    if (!record_chunk) {
+        record_chunk = std::make_unique_for_overwrite<RecordChunk>();
+    }
+}
+
+void Scheduler::SyncRecording() {
+    if (!recorder_thread.joinable()) {
+        return;
+    }
+    KickRecording(true);
+    const auto idle = [this] {
+        return done_chunks.load(std::memory_order_acquire) == handed_chunks_;
+    };
+    if (idle()) {
+        return;
+    }
+    const u64 t0 = Common::FencedRDTSC();
+    // The remainder is usually a few microseconds of work: a sleep and wake-up would cost
+    // about as much again, so spin first and sleep only when the recorder is far behind.
+    const auto spin_until = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+    bool done = false;
+    for (u32 spins = 1; !(done = idle()); ++spins) {
+        Common::CpuPause();
+        if (!(spins & 63) && std::chrono::steady_clock::now() >= spin_until) {
+            break;
+        }
+    }
+    if (!done) {
+        std::unique_lock lk{recorder_mutex};
+        recorder_idle_cv.wait(lk, idle);
+        ++recorder_sync_blocked_;
+    }
+    recorder_sync_ticks_ += Common::FencedRDTSC() - t0;
+}
+
+void Scheduler::NoteSyncSite(const std::source_location& loc) {
+    for (auto& site : sync_sites_) {
+        if (site.count == 0) {
+            site = {loc.file_name(), loc.line(), 1};
+            return;
+        }
+        if (site.line == loc.line() && std::strcmp(site.file, loc.file_name()) == 0) {
+            ++site.count;
+            return;
+        }
+    }
+    // ponytail: a full table drops later sites; the syncs total still counts them.
+}
+
+void Scheduler::RecorderThread(std::stop_token stoken) {
+    Common::SetCurrentThreadName("shadPS4:VkRecorder");
+    // A spinning recorder on the GPU command thread's reserved core would take the time it saves.
+    if (const u64 strip = Common::GetExclusionStripMask()) {
+        Common::SetCurrentThreadAffinityMask(~strip);
+    }
+    // Spin briefly before sleeping: the next chunk usually follows within microseconds, and a
+    // sleeping recorder costs the GPU command thread a wakeup syscall per kick. With few
+    // hardware threads the spin would take time from the guest threads.
+    const auto spin_time =
+        std::chrono::microseconds(std::thread::hardware_concurrency() >= 12 ? 200 : 20);
+    while (true) {
+        const auto spin_until = std::chrono::steady_clock::now() + spin_time;
+        for (u32 spins = 1; queued_chunks.load(std::memory_order_acquire) == 0; ++spins) {
+            Common::CpuPause();
+            if (!(spins & 255) &&
+                (stoken.stop_requested() || std::chrono::steady_clock::now() >= spin_until)) {
+                break;
+            }
+        }
+        std::unique_ptr<RecordChunk> chunk;
+        {
+            std::unique_lock lk{recorder_mutex};
+            recorder_sleeping = true;
+            recorder_cv.wait(lk, stoken, [this] { return !recorder_queue.empty(); });
+            recorder_sleeping = false;
+            if (recorder_queue.empty()) {
+                return;
+            }
+            chunk = std::move(recorder_queue.front());
+            recorder_queue.pop_front();
+            queued_chunks.store(recorder_queue.size(), std::memory_order_release);
+        }
+        chunk->Execute(chunk->target);
+        {
+            std::scoped_lock lk{recorder_mutex};
+            free_chunks.push_back(std::move(chunk));
+            done_chunks.fetch_add(1, std::memory_order_release);
+            if (recorder_queue.empty()) {
+                recorder_idle_cv.notify_all();
+            }
+        }
+    }
+}
+
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuSchedPriorityPendingOpsRunner");
 
@@ -329,164 +507,206 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     }
 }
 
-void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf) {
+void DynamicState::Commit(const Instance& instance, Scheduler& scheduler) {
+    // The dirty bits are read and cleared here; only the commands go through Record().
+    const auto rec = [&scheduler](auto&& func) { scheduler.Record(std::move(func)); };
     if (dirty_state.viewports) {
         dirty_state.viewports = false;
-        cmdbuf.setViewportWithCount(viewports);
+        scheduler.ReserveRecordData(sizeof(viewports));
+        const auto data = scheduler.RecordData(std::span<const vk::Viewport>{viewports});
+        rec([data](vk::CommandBuffer cmdbuf) { cmdbuf.setViewportWithCount(data); });
     }
     if (dirty_state.scissors) {
         dirty_state.scissors = false;
-        cmdbuf.setScissorWithCount(scissors);
+        scheduler.ReserveRecordData(sizeof(scissors));
+        const auto data = scheduler.RecordData(std::span<const vk::Rect2D>{scissors});
+        rec([data](vk::CommandBuffer cmdbuf) { cmdbuf.setScissorWithCount(data); });
     }
     if (dirty_state.depth_test_enabled) {
         dirty_state.depth_test_enabled = false;
-        cmdbuf.setDepthTestEnable(depth_test_enabled);
+        rec([a0 = depth_test_enabled](vk::CommandBuffer cmdbuf) { cmdbuf.setDepthTestEnable(a0); });
     }
     if (dirty_state.depth_write_enabled) {
         dirty_state.depth_write_enabled = false;
         // Note that this must be set in a command buffer even if depth test is disabled.
-        cmdbuf.setDepthWriteEnable(depth_write_enabled);
+        rec([a0 = depth_write_enabled](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setDepthWriteEnable(a0);
+        });
     }
     if (depth_test_enabled && dirty_state.depth_compare_op) {
         dirty_state.depth_compare_op = false;
-        cmdbuf.setDepthCompareOp(depth_compare_op);
+        rec([a0 = depth_compare_op](vk::CommandBuffer cmdbuf) { cmdbuf.setDepthCompareOp(a0); });
     }
     if (dirty_state.depth_bounds_test_enabled) {
         dirty_state.depth_bounds_test_enabled = false;
         if (instance.IsDepthBoundsSupported()) {
-            cmdbuf.setDepthBoundsTestEnable(depth_bounds_test_enabled);
+            rec([a0 = depth_bounds_test_enabled](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setDepthBoundsTestEnable(a0);
+            });
         }
     }
     if (depth_bounds_test_enabled && dirty_state.depth_bounds) {
         dirty_state.depth_bounds = false;
         if (instance.IsDepthBoundsSupported()) {
-            cmdbuf.setDepthBounds(depth_bounds_min, depth_bounds_max);
+            rec([a0 = depth_bounds_min, a1 = depth_bounds_max](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setDepthBounds(a0, a1);
+            });
         }
     }
     if (dirty_state.depth_bias_enabled) {
         dirty_state.depth_bias_enabled = false;
-        cmdbuf.setDepthBiasEnable(depth_bias_enabled);
+        rec([a0 = depth_bias_enabled](vk::CommandBuffer cmdbuf) { cmdbuf.setDepthBiasEnable(a0); });
     }
     if (depth_bias_enabled && dirty_state.depth_bias) {
         dirty_state.depth_bias = false;
-        cmdbuf.setDepthBias(depth_bias_constant, depth_bias_clamp, depth_bias_slope);
+        rec([a0 = depth_bias_constant, a1 = depth_bias_clamp,
+             a2 = depth_bias_slope](vk::CommandBuffer cmdbuf) { cmdbuf.setDepthBias(a0, a1, a2); });
     }
     if (dirty_state.stencil_test_enabled) {
         dirty_state.stencil_test_enabled = false;
-        cmdbuf.setStencilTestEnable(stencil_test_enabled);
+        rec([a0 = stencil_test_enabled](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setStencilTestEnable(a0);
+        });
     }
     if (stencil_test_enabled) {
         if (dirty_state.stencil_front_ops && dirty_state.stencil_back_ops &&
             stencil_front_ops == stencil_back_ops) {
             dirty_state.stencil_front_ops = false;
             dirty_state.stencil_back_ops = false;
-            cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFrontAndBack, stencil_front_ops.fail_op,
-                                stencil_front_ops.pass_op, stencil_front_ops.depth_fail_op,
-                                stencil_front_ops.compare_op);
+            rec([a1 = stencil_front_ops.fail_op, a2 = stencil_front_ops.pass_op,
+                 a3 = stencil_front_ops.depth_fail_op,
+                 a4 = stencil_front_ops.compare_op](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFrontAndBack, a1, a2, a3, a4);
+            });
         } else {
             if (dirty_state.stencil_front_ops) {
                 dirty_state.stencil_front_ops = false;
-                cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFront, stencil_front_ops.fail_op,
-                                    stencil_front_ops.pass_op, stencil_front_ops.depth_fail_op,
-                                    stencil_front_ops.compare_op);
+                rec([a1 = stencil_front_ops.fail_op, a2 = stencil_front_ops.pass_op,
+                     a3 = stencil_front_ops.depth_fail_op,
+                     a4 = stencil_front_ops.compare_op](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFront, a1, a2, a3, a4);
+                });
             }
             if (dirty_state.stencil_back_ops) {
                 dirty_state.stencil_back_ops = false;
-                cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eBack, stencil_back_ops.fail_op,
-                                    stencil_back_ops.pass_op, stencil_back_ops.depth_fail_op,
-                                    stencil_back_ops.compare_op);
+                rec([a1 = stencil_back_ops.fail_op, a2 = stencil_back_ops.pass_op,
+                     a3 = stencil_back_ops.depth_fail_op,
+                     a4 = stencil_back_ops.compare_op](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eBack, a1, a2, a3, a4);
+                });
             }
         }
         if (dirty_state.stencil_front_reference && dirty_state.stencil_back_reference &&
             stencil_front_reference == stencil_back_reference) {
             dirty_state.stencil_front_reference = false;
             dirty_state.stencil_back_reference = false;
-            cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack,
-                                       stencil_front_reference);
+            rec([a1 = stencil_front_reference](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack, a1);
+            });
         } else {
             if (dirty_state.stencil_front_reference) {
                 dirty_state.stencil_front_reference = false;
-                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFront,
-                                           stencil_front_reference);
+                rec([a1 = stencil_front_reference](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFront, a1);
+                });
             }
             if (dirty_state.stencil_back_reference) {
                 dirty_state.stencil_back_reference = false;
-                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eBack, stencil_back_reference);
+                rec([a1 = stencil_back_reference](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eBack, a1);
+                });
             }
         }
         if (dirty_state.stencil_front_write_mask && dirty_state.stencil_back_write_mask &&
             stencil_front_write_mask == stencil_back_write_mask) {
             dirty_state.stencil_front_write_mask = false;
             dirty_state.stencil_back_write_mask = false;
-            cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFrontAndBack,
-                                       stencil_front_write_mask);
+            rec([a1 = stencil_front_write_mask](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFrontAndBack, a1);
+            });
         } else {
             if (dirty_state.stencil_front_write_mask) {
                 dirty_state.stencil_front_write_mask = false;
-                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFront,
-                                           stencil_front_write_mask);
+                rec([a1 = stencil_front_write_mask](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFront, a1);
+                });
             }
             if (dirty_state.stencil_back_write_mask) {
                 dirty_state.stencil_back_write_mask = false;
-                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eBack, stencil_back_write_mask);
+                rec([a1 = stencil_back_write_mask](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eBack, a1);
+                });
             }
         }
         if (dirty_state.stencil_front_compare_mask && dirty_state.stencil_back_compare_mask &&
             stencil_front_compare_mask == stencil_back_compare_mask) {
             dirty_state.stencil_front_compare_mask = false;
             dirty_state.stencil_back_compare_mask = false;
-            cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFrontAndBack,
-                                         stencil_front_compare_mask);
+            rec([a1 = stencil_front_compare_mask](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFrontAndBack, a1);
+            });
         } else {
             if (dirty_state.stencil_front_compare_mask) {
                 dirty_state.stencil_front_compare_mask = false;
-                cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFront,
-                                             stencil_front_compare_mask);
+                rec([a1 = stencil_front_compare_mask](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFront, a1);
+                });
             }
             if (dirty_state.stencil_back_compare_mask) {
                 dirty_state.stencil_back_compare_mask = false;
-                cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eBack,
-                                             stencil_back_compare_mask);
+                rec([a1 = stencil_back_compare_mask](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eBack, a1);
+                });
             }
         }
     }
     if (dirty_state.primitive_restart_enable) {
         dirty_state.primitive_restart_enable = false;
-        cmdbuf.setPrimitiveRestartEnable(primitive_restart_enable);
+        rec([a0 = primitive_restart_enable](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setPrimitiveRestartEnable(a0);
+        });
     }
     if (dirty_state.rasterizer_discard_enable) {
         dirty_state.rasterizer_discard_enable = false;
-        cmdbuf.setRasterizerDiscardEnable(rasterizer_discard_enable);
+        rec([a0 = rasterizer_discard_enable](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setRasterizerDiscardEnable(a0);
+        });
     }
     if (dirty_state.cull_mode) {
         dirty_state.cull_mode = false;
-        cmdbuf.setCullMode(cull_mode);
+        rec([a0 = cull_mode](vk::CommandBuffer cmdbuf) { cmdbuf.setCullMode(a0); });
     }
     if (dirty_state.front_face) {
         dirty_state.front_face = false;
-        cmdbuf.setFrontFace(front_face);
+        rec([a0 = front_face](vk::CommandBuffer cmdbuf) { cmdbuf.setFrontFace(a0); });
     }
     if (dirty_state.blend_constants) {
         dirty_state.blend_constants = false;
-        cmdbuf.setBlendConstants(blend_constants.data());
+        rec([v = blend_constants](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setBlendConstants(v.data());
+        });
     }
     if (dirty_state.color_write_masks) {
         dirty_state.color_write_masks = false;
         if (instance.IsDynamicColorWriteMaskEnabled()) {
-            cmdbuf.setColorWriteMaskEXT(0, color_write_masks);
+            rec([v = color_write_masks](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setColorWriteMaskEXT(0, v);
+            });
         } else {
             ++color_write_mask_skips_;
         }
     }
     if (dirty_state.line_width) {
         dirty_state.line_width = false;
-        cmdbuf.setLineWidth(line_width);
+        rec([a0 = line_width](vk::CommandBuffer cmdbuf) { cmdbuf.setLineWidth(a0); });
     }
     if (dirty_state.feedback_loop_enabled && instance.IsAttachmentFeedbackLoopLayoutSupported()) {
         dirty_state.feedback_loop_enabled = false;
-        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_enabled
-                                                      ? vk::ImageAspectFlagBits::eColor
-                                                      : vk::ImageAspectFlagBits::eNone);
+        const auto aspect = feedback_loop_enabled ? vk::ImageAspectFlagBits::eColor
+                                                  : vk::ImageAspectFlagBits::eNone;
+        rec([aspect](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setAttachmentFeedbackLoopEnableEXT(aspect);
+        });
     }
 }
 

@@ -206,7 +206,8 @@ Rasterizer::~Rasterizer() {
 
 void Rasterizer::BindPipelineDedup(vk::PipelineBindPoint point, vk::Pipeline handle) {
     if (!Skipcache::Framework::Instance().Active()) {
-        scheduler.CommandBuffer().bindPipeline(point, handle);
+        scheduler.Record(
+            [point, handle](vk::CommandBuffer cmdbuf) { cmdbuf.bindPipeline(point, handle); });
         return;
     }
     const u64 tick = scheduler.CurrentTick();
@@ -222,7 +223,8 @@ void Rasterizer::BindPipelineDedup(vk::PipelineBindPoint point, vk::Pipeline han
     }
     last_bound_pipeline_[idx] = handle;
     last_bound_pipeline_gen_[idx] = fgen;
-    scheduler.CommandBuffer().bindPipeline(point, handle);
+    scheduler.Record(
+        [point, handle](vk::CommandBuffer cmdbuf) { cmdbuf.bindPipeline(point, handle); });
 }
 
 bool Rasterizer::FilterDraw() {
@@ -680,17 +682,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
     BindPipelineDedup(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
+    const u32 num_indices = regs.num_indices;
+    const u32 num_instances = regs.num_instances.NumInstances();
     if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), first_index,
-                           s32(vertex_offset), instance_offset);
+        scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.drawIndexed(num_indices, num_instances, first_index, s32(vertex_offset),
+                               instance_offset);
+        });
     } else {
-        cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
-                    instance_offset);
+        scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.draw(num_indices, num_instances, vertex_offset, instance_offset);
+        });
     }
     DebugState.IncDrawCall();
+    scheduler.KickRecording();
 
     ResetBindings(false);
     if (flush_draw_interval_ != 0) {
@@ -854,30 +861,38 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
     BindPipelineDedup(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
+    const vk::Buffer args = buffer->Handle();
+    const vk::Buffer count = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
         if (count_address != 0) {
-            cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
-                                            count_offset, max_count, stride);
+            scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+                cmdbuf.drawIndexedIndirectCount(args, base, count, count_offset, max_count, stride);
+            });
         } else {
-            cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
+            scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+                cmdbuf.drawIndexedIndirect(args, base, max_count, stride);
+            });
         }
         DebugState.IncDrawCall();
     } else {
         ASSERT(sizeof(VkDrawIndirectCommand) == stride);
 
         if (count_address != 0) {
-            cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(), count_offset,
-                                     max_count, stride);
+            scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+                cmdbuf.drawIndirectCount(args, base, count, count_offset, max_count, stride);
+            });
         } else {
-            cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
+            scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+                cmdbuf.drawIndirect(args, base, max_count, stride);
+            });
         }
         DebugState.IncDrawCall();
     }
+    scheduler.KickRecording();
 
     ResetBindings(false);
 }
@@ -918,10 +933,14 @@ void Rasterizer::DispatchDirect() {
     pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
                             bind_image_n_);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
-    cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    scheduler.Record([handle = pipeline->Handle(), x = u32(cs_program.dim_x),
+                      y = u32(cs_program.dim_y),
+                      z = u32(cs_program.dim_z)](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.dispatch(x, y, z);
+    });
     DebugState.IncDispatch();
+    scheduler.KickRecording();
 
     ResetBindings(true);
     if (flush_draw_interval_ != 0) {
@@ -959,10 +978,13 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
                             bind_image_n_);
 
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
-    cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    scheduler.Record(
+        [handle = pipeline->Handle(), args = buffer->Handle(), base](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+            cmdbuf.dispatchIndirect(args, base);
+        });
     DebugState.IncDispatch();
+    scheduler.KickRecording();
 
     ResetBindings(true);
 }
@@ -1061,6 +1083,22 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
              ws[0].count, ms(ws[0].ns), ws[1].count, ms(ws[1].ns), ws[2].count, ms(ws[2].ns),
              ws[3].count, ms(ws[3].ns), ws[4].count, ms(ws[4].ns));
     ws = {};
+    if (const auto rec = scheduler.DrainRecorderStats(); rec.enabled) {
+        std::string sites;
+        for (const auto& site : rec.sites) {
+            if (site.count != 0) {
+                fmt::format_to(std::back_inserter(sites), " {}:{}={}",
+                               std::string_view{site.file}.substr(
+                                   std::string_view{site.file}.find_last_of('/') + 1),
+                               site.line, site.count);
+            }
+        }
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] RECORDER syncs={} sync={}ms blocked={} chunks={} kicks={} "
+                 "forced={} sites:{} per300f",
+                 rec.syncs, ms(rec.sync_ticks), rec.blocked, rec.chunks, rec.kicks, rec.forced,
+                 sites);
+    }
     if (tracker_lock_spin_) {
         const auto tl = VideoCore::RegionLock::Drain();
         LOG_INFO(Render_Skipcache,
@@ -1672,8 +1710,15 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
             vertex_input_foreign_gen_ != foreign_gen ||
             !std::ranges::equal(input_bindings, vertex_input_bindings_) ||
             !std::ranges::equal(input_attributes, vertex_input_attributes_)) {
-            const auto cmdbuf = scheduler.CommandBuffer();
-            cmdbuf.setVertexInputEXT(input_bindings, input_attributes);
+            scheduler.ReserveRecordData(input_bindings.size() * sizeof(input_bindings[0]) +
+                                        input_attributes.size() * sizeof(input_attributes[0]));
+            const auto rec_bindings = scheduler.RecordData(
+                std::span{std::as_const(input_bindings).data(), input_bindings.size()});
+            const auto rec_attributes = scheduler.RecordData(
+                std::span{std::as_const(input_attributes).data(), input_attributes.size()});
+            scheduler.Record([rec_bindings, rec_attributes](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setVertexInputEXT(rec_bindings, rec_attributes);
+            });
             ++vinput_sets_;
             vertex_input_valid_ = skipcache.Active();
             vertex_input_tick_ = tick;
@@ -1757,13 +1802,25 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
         host_strides.push_back(buffer.GetStride());
     }
 
-    const auto cmdbuf = scheduler.CommandBuffer();
-    const auto num_buffers = guest_buffers.size();
+    const u32 num_buffers = static_cast<u32>(guest_buffers.size());
+    scheduler.ReserveRecordData(num_buffers * (sizeof(vk::Buffer) + 3 * sizeof(vk::DeviceSize)));
+    const auto buffers =
+        scheduler.RecordData(std::span<const vk::Buffer>{host_buffers.data(), host_buffers.size()});
+    const auto offsets = scheduler.RecordData(
+        std::span<const vk::DeviceSize>{host_offsets.data(), host_offsets.size()});
     if (instance.IsVertexInputDynamicState()) {
-        cmdbuf.bindVertexBuffers(0, num_buffers, host_buffers.data(), host_offsets.data());
+        scheduler.Record([num_buffers, buffers, offsets](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindVertexBuffers(0, num_buffers, buffers.data(), offsets.data());
+        });
     } else {
-        cmdbuf.bindVertexBuffers2(0, num_buffers, host_buffers.data(), host_offsets.data(),
-                                  host_sizes.data(), host_strides.data());
+        const auto sizes = scheduler.RecordData(
+            std::span<const vk::DeviceSize>{host_sizes.data(), host_sizes.size()});
+        const auto strides = scheduler.RecordData(
+            std::span<const vk::DeviceSize>{host_strides.data(), host_strides.size()});
+        scheduler.Record([num_buffers, buffers, offsets, sizes, strides](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindVertexBuffers2(0, num_buffers, buffers.data(), offsets.data(), sizes.data(),
+                                      strides.data());
+        });
     }
 }
 
@@ -1782,8 +1839,9 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
     const auto [buffer, offset] =
         buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindIndexBuffer(buffer->Handle(), offset, index_type);
+    scheduler.Record([handle = buffer->Handle(), offset, index_type](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindIndexBuffer(handle, offset, index_type);
+    });
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
@@ -3160,7 +3218,7 @@ bool Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
             skipcache->RecordVerifyClean(CacheId::DynState);
         }
     }
-    dynamic_state.Commit(instance, scheduler.CommandBuffer());
+    dynamic_state.Commit(instance, scheduler);
 
     if (probing && !dyn_would_hit) {
         auto& ctr = skipcache->Counters(CacheId::DynState);

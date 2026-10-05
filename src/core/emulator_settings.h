@@ -460,6 +460,12 @@ struct GPUSettings {
     // Skip adding a buffer range to the barrier lists when one recorded range already covers it.
     // The lists come out identical, without the vector shifts of the insert.
     Setting<bool> covered_range_skip{true};
+    // Record Vulkan commands on a separate thread (shadPS4:VkRecorder). The GPU command thread
+    // queues them and waits for the thread before each submit. Read once at start.
+    Setting<bool> vk_record_thread{false};
+    // KiB of queued commands that the GPU command thread collects before it hands them to the
+    // recording thread at the end of a draw. A submit hands over the rest. Read once at start.
+    Setting<u32> vk_record_kick_kb{8};
     // Answer "already resident" from one bit per sparse block (2 MB, or 8 MB with 16 KB blocks)
     // instead of searching the resident range list on every buffer bind.
     Setting<bool> residency_bitmap{true};
@@ -732,6 +738,8 @@ struct GPUSettings {
             GPU_OVERRIDE(one_thread_per_core),
             GPU_OVERRIDE(vertex_layout_memo),
             GPU_OVERRIDE(covered_range_skip),
+            GPU_OVERRIDE(vk_record_thread),
+            GPU_OVERRIDE(vk_record_kick_kb),
             GPU_OVERRIDE(residency_bitmap),
             GPU_OVERRIDE(stream_barrier_skip),
             GPU_OVERRIDE(clean_sync_peek),
@@ -827,7 +835,7 @@ struct GPUSettings {
     runtime_info_stamp_gate, userfaultfd, gpu_thread_core_reserve, one_thread_per_core, \
     vertex_layout_memo, covered_range_skip, residency_bitmap, \
     readback_linear_images_async, inline_fetch_shader, stream_barrier_skip, \
-    clean_sync_peek, readback_offload
+    clean_sync_peek, readback_offload, vk_record_thread, vk_record_kick_kb
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1136,6 +1144,8 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, OneThreadPerCore, one_thread_per_core)
     SETTING_FORWARD_BOOL(m_gpu, VertexLayoutMemo, vertex_layout_memo)
     SETTING_FORWARD_BOOL(m_gpu, CoveredRangeSkip, covered_range_skip)
+    SETTING_FORWARD_BOOL(m_gpu, VkRecordThread, vk_record_thread)
+    SETTING_FORWARD(m_gpu, VkRecordKickKb, vk_record_kick_kb)
     SETTING_FORWARD_BOOL(m_gpu, ResidencyBitmap, residency_bitmap)
     SETTING_FORWARD_BOOL(m_gpu, StreamBarrierSkip, stream_barrier_skip)
     SETTING_FORWARD_BOOL(m_gpu, CleanSyncPeek, clean_sync_peek)
