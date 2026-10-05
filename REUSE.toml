@@ -36,6 +36,7 @@ path = [
     "src/resources/silver.png",
     "src/resources/trophy.wav",
     "AGENTS.md",
+    "documents/gr2-fsr411/**",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "shadPS4 Emulator Project"

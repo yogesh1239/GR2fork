@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: FSR 4.1.1 (AMD's INT8 model of the 4.1.1 upscaler DLL, or on RDNA4 the FP8 model of the
 // driver-side amdxcffx64.dll: sets with a dispatch.txt) on Vulkan, replaying what the DLL
