@@ -36,4 +36,6 @@ by one game's motion vectors is game-specific by design, which the code rules ab
   `~/.local/share/shadPS4`, so never launch from anywhere else.
 - Never write to `/home/yogesh/Games/GR2fork-linux64-2026-07-27-d7bef71` (the user's live install).
 - Never commit AMD's FSR 4.1.1 model files (`fsr4_411*`), PS4 system modules, saves or game files.
+- In the FSR code, call Vulkan through `vkd.` (`VULKAN_HPP_DEFAULT_DISPATCHER`), never the global
+  `vk...` functions: `shadps4` does not link the Vulkan library, and Windows has none to link.
 - The user is not a programmer: explain in plain language (see `~/.claude/CLAUDE.md`).

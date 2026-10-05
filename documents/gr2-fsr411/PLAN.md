@@ -369,8 +369,8 @@ Your Bloodborne port already does the same thing for Bloodborne's characters. I 
   - Fallback: define the C struct and sType locally and chain it through raw `pNext`.
   - This is required: `Record411` checks `IsFsr411Supported()` even for FP8 sets (bbport `vk_fsr4.cpp:229`).
 - **Loader linkage:** EXODUS defines `VK_NO_PROTOTYPES` (`vk_common.h:8-9`) and uses the vulkan-hpp dynamic dispatcher (`vk_platform.cpp:273-274`). It does not link libvulkan. `fsr411.cpp` calls about 40 C entry points.
-  - Decision: link `Vulkan::Vulkan` (libvulkan.so.1, the same loader the dispatcher dlopens), and compile `fsr411.cpp` without `VK_NO_PROTOTYPES`.
-  - Alternative: route the calls through `VULKAN_HPP_DEFAULT_DISPATCHER`.
+  - First decision: link `Vulkan::Vulkan` (libvulkan.so.1, the same loader the dispatcher dlopens), and compile `fsr411.cpp` without `VK_NO_PROTOTYPES`. Replaced 2026-10-06: the Windows build has no `vulkan.lib`, so the link failed.
+  - Current: `fsr411.cpp` calls the C entry points through `VULKAN_HPP_DEFAULT_DISPATCHER` (`vkd.vk...`), and `fsr411.h` includes `vk_common.h`, so a direct `vk...` call does not compile. `shadps4` does not link libvulkan.
 - **Build:**
   - `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld`, then `cmake --build build`.
   - CI uses clang-19 + mold. Local: clang/lld 23.1.1, no mold, no ccache.
@@ -455,7 +455,7 @@ Analysis is headless: `qrenderdoc --python <script>` on the normal display (`QT_
 - **Size check done:** `fsr411.cpp` takes any output up to 3840x2160 (`rw <= ow`). Above 1920x1080 it uses the t2160 tier; dispatch counts and the tensor table come from the output size aligned to 8. bbport commit f555009 verified FP8 bit-exact against the DLL at 1440p and ran 1707x960 -> 2560x1440 in game at 0.79-0.89 ms. Native ratio (1440p -> 1440p) is untested but is not restricted.
 - **As built (2026-10-05):**
   - `src/video_core/renderer_vulkan/fsr411/fsr411.{h,cpp}`: copied unchanged from bbport.
-  - It calls global Vulkan functions, while the emulator uses the dynamic dispatcher (`VK_NO_PROTOTYPES` in `vk_common.h`). Fix: `shadps4` links `vulkan` (libvulkan.so.1, the same library the dispatcher opens). Linux only.
+  - It calls global Vulkan functions, while the emulator uses the dynamic dispatcher (`VK_NO_PROTOTYPES` in `vk_common.h`). First fix: `shadps4` linked `vulkan` (libvulkan.so.1). Replaced 2026-10-06, because Windows has no `vulkan.lib`: the calls go through `vkd.` (`VULKAN_HPP_DEFAULT_DISPATCHER`) and nothing links libvulkan.
   - `vk_instance`: the 4 extensions and their features are optional and unlinked when missing (RenderDoc may hide them). Getter `IsFsr411Fp8Supported()`. `enabled_extensions` grew from 32 to 40.
   - `vk_fsr411_pass.{h,cpp}`: `Fsr411Pass`, owned by `Rasterizer`. `Record()` waits for the frame 8 frames back with scheduler ticks, ends rendering, records into the scheduler's command buffer, and logs `Describe()`. An "unsupported size" error is transient; any other error disables FSR for the session. `SelfTest(w, h)` creates scratch RGBA16F/D32/RG16F/RGBA16F images (VMA), records one reset frame and calls `scheduler.Finish()`. It runs in the `Rasterizer` constructor when `fsr411_enabled` is set, at the configured window size.
   - Settings `fsr411_enabled` (bool) and `fsr411_sharpness` (0-100) at the end of `GPU_SETTINGS_JSON_FIELDS_B` (47 of 63 names). Menu: `core/devtools/layer.cpp`, Display > FSR 4.1.1 (live toggle, Save).
