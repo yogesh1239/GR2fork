@@ -111,7 +111,7 @@ static std::array<float, 2> Fsr411Jitter(u32 index) {
 // Not full-screen passes (a shifted quad would resample its input) and not clip-disabled
 // screen-space draws.
 void Rasterizer::SelectDrawJitter(bool full_screen) {
-    const bool scene = fsr411_depth && db_desc.first == fsr411_depth;
+    const bool scene = fsr411_depth && db_desc.image_id == fsr411_depth;
     const bool on = scene && fsr411_flips >= 1 && fsr411_flips <= 4 && !full_screen &&
                     fsr411_test_mode_ != 2 && !liverpool->regs.IsClipDisabled();
     draw_jitter_key_ = on ? fsr411_jitter_index : 0;
@@ -1158,7 +1158,7 @@ bool Rasterizer::RunFsr411() {
 void Rasterizer::PrepareMotion(const GraphicsPipeline* pipeline, const RenderState& state,
                                bool is_indexed, u32 index_offset) {
     ++object_motion.draws;
-    if (!fsr411_depth || db_desc.first != fsr411_depth || !motion_geometry_ ||
+    if (!fsr411_depth || db_desc.image_id != fsr411_depth || !motion_geometry_ ||
         !state.color_attachments[Shader::MotionVectors::Output].image_view) {
         return;
     }
@@ -3200,7 +3200,7 @@ const RenderState& Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) 
 
     // FSR 4.1.1 object motion: the image only on the scene of a frame FSR runs on, single-layer
     // and inside it. Elsewhere the slot stays empty (dynamicRenderingUnusedAttachments).
-    if (key.motion_vectors && fsr411_depth && db_desc.first == fsr411_depth &&
+    if (key.motion_vectors && fsr411_depth && db_desc.image_id == fsr411_depth &&
         state.num_layers == 1) {
         if (const auto view = object_motion.View(state.width, state.height)) {
             auto& attachment = state.color_attachments[Shader::MotionVectors::Output];

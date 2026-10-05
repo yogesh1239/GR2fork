@@ -780,9 +780,10 @@ void EmitContext::DefineOutputs() {
 
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
-    const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[2],
-                                         U32[1], U32[1], U32[1], U32[1], U32[1], U32[1], U64),
-                              "AuxData")};
+    const Id struct_type{
+        Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4], U32[2], U32[1],
+                        U32[1], U32[1], U32[1], U32[1], U32[1], U64),
+             "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
     MemberName(struct_type, PushData::YOffsetIndex, "yoffset");
@@ -791,6 +792,7 @@ void EmitContext::DefinePushDataBlock() {
     MemberName(struct_type, PushData::BufOffsetIndex + 0, "buf_offsets0");
     MemberName(struct_type, PushData::BufOffsetIndex + 1, "buf_offsets1");
     MemberName(struct_type, PushData::BufOffsetIndex + 2, "buf_offsets2");
+    MemberName(struct_type, PushData::BufOffsetIndex + 3, "buf_offsets3");
     MemberDecorate(struct_type, PushData::XOffsetIndex, spv::Decoration::Offset, 0U);
     MemberDecorate(struct_type, PushData::YOffsetIndex, spv::Decoration::Offset, 4U);
     MemberDecorate(struct_type, PushData::XScaleIndex, spv::Decoration::Offset, 8U);
@@ -798,13 +800,14 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 16U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 32U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 48U);
+    MemberDecorate(struct_type, PushData::BufOffsetIndex + 3, spv::Decoration::Offset, 64U);
     for (u32 i = 0; i < 6; ++i) {
         MemberDecorate(struct_type, PushData::MotionIndex + i, spv::Decoration::Offset,
-                       56U + 4 * i);
+                       72U + 4 * i);
     }
     MemberName(struct_type, PushData::MotionIndex, "motion");
     MemberName(struct_type, PushData::MotionPositionsIndex, "motion_positions");
-    MemberDecorate(struct_type, PushData::MotionPositionsIndex, spv::Decoration::Offset, 80U);
+    MemberDecorate(struct_type, PushData::MotionPositionsIndex, spv::Decoration::Offset, 96U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
