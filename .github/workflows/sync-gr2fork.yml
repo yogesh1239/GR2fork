@@ -1,0 +1,41 @@
+# Merges new GR2fork commits into this branch once a day. A merge that conflicts with this
+# branch's own changes is not pushed: the run fails, GitHub sends an email, and the run summary
+# lists the conflicting files. After a clean merge, Build and Release compiles the result.
+
+name: Merge GR2fork updates
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Merge GR2fork-EXODUS
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git fetch --no-recurse-submodules https://github.com/junminlee2004/GR2fork.git GR2fork-EXODUS
+        before=$(git rev-parse HEAD)
+        if ! git merge --no-edit FETCH_HEAD; then
+          { echo "GR2fork changes conflict with this branch. Merge these files by hand:"
+            git diff --name-only --diff-filter=U; } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        if [ "$(git rev-parse HEAD)" != "$before" ]; then
+          git push
+          # A push made with this token starts no workflow, so start the build check by hand.
+          gh workflow run build.yml --ref "$GITHUB_REF_NAME"
+        fi
