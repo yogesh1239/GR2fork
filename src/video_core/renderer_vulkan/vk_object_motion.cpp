@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/logging/log.h"
-#include "core/emulator_settings.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+
+#include <utility>
 
 #include <vk_mem_alloc.h>
 
@@ -17,8 +18,10 @@ static constexpr vk::ImageSubresourceRange MotionRange{vk::ImageAspectFlagBits::
 
 ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_},
-      image{instance_.GetDevice(), instance_.GetAllocator()} {
-    if (!EmulatorSettings.IsFsr411Enabled() || !instance.IsFsr411Fp8Supported()) {
+      image{instance_.GetDevice(), instance_.GetAllocator()} {}
+
+void ObjectMotion::Enable() {
+    if (std::exchange(tried, true) || !instance.IsFsr411Fp8Supported()) {
         return;
     }
     const auto features =
@@ -87,7 +90,7 @@ bool ObjectMotion::PrepareRead(u32 width, u32 height) {
     return true;
 }
 
-bool ObjectMotion::EndFrame(u32 width, u32 height) {
+bool ObjectMotion::EndFrame(u32 width, u32 height, bool gap) {
     // Also when all are 0: a selection that never matches shows here.
     if (frame % 600 == 599) {
         const auto& s = history.stats;
@@ -103,7 +106,7 @@ bool ObjectMotion::EndFrame(u32 width, u32 height) {
         index_ranges.stats = {};
         draws = blended = 0;
     }
-    history.NextFrame();
+    history.NextFrame(gap);
     if (++frame % Motion::IndexRangeCache::Unused == 0) {
         index_ranges.Trim(frame);
     }

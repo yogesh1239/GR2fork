@@ -1603,6 +1603,9 @@ Shader::ShaderParams PipelineCache::ResolveParams(SwStage l_stage, const Pgm& pg
 // They draw into one RGBA16F target with a depth test, from a vertex shader alone. (Their ink
 // outline goes through a geometry shader, which the motion code does not follow.)
 // Only registers decide here, before the stages resolve: the runtime infos read the result.
+// The motion varyings take locations 30 and 31 (MotionVectors), so the draw's own varyings must
+// end at 29, with 1 to spare for the clip-distance shift: VS params below the export count, PS
+// inputs at their mapped location. RefreshGraphicsStages checks the VS code itself too.
 static bool MotionDraw(const AmdGpu::Regs& regs) {
     using namespace AmdGpu;
     using LiverpoolToVK::IsDualSourceBlendFactor;
@@ -1610,6 +1613,15 @@ static bool MotionDraw(const AmdGpu::Regs& regs) {
     const auto& cb7 = regs.color_buffers[Shader::MotionVectors::Output];
     const auto& blend = regs.blend_control[0];
     // Dual-source blending allows one colour attachment only.
+    if (regs.vs_output_config.NumExports() > 29) {
+        return false;
+    }
+    for (u32 i = 0; i < regs.num_interp; ++i) {
+        const auto& input = regs.ps_inputs[i];
+        if ((!input.use_default || input.flat_shade) && input.input_offset > 28) {
+            return false;
+        }
+    }
     const bool dual_source =
         blend.enable && !cb0.info.blend_bypass &&
         (IsDualSourceBlendFactor(blend.color_src_factor) ||
@@ -1635,7 +1647,8 @@ bool PipelineCache::RefreshGraphicsStages(bool track_hash_diff) {
     auto& key = graphics_key;
     fetch_shader_ref = {};
     stage_hash_diff = 0;
-    motion_sel_ = object_motion_ && MotionDraw(regs);
+    motion_sel_ = object_motion_ && MotionDraw(regs) &&
+                  !std::ranges::contains(motion_vetoed_, regs.vs_program.Address<const u32*>());
 
     // An armed resolve accumulates old ^ new per stage hash it writes, so the
     // reuse decision never reloads the array right after these stores.
@@ -1772,6 +1785,24 @@ bool PipelineCache::RefreshGraphicsStages(bool track_hash_diff) {
     }
 
     const auto* vs_info = infos[static_cast<u32>(Shader::SwStage::Vertex)];
+    // The VS declares a varying at the motion locations, even if only in a branch that never
+    // runs: VertexMotion() leaves the motion out, but the FS already resolved with it. Both
+    // resolve again without it; the reuse path hands over to the full refresh for that.
+    if (motion_sel_ && vs_info &&
+        (vs_info->stores.GetAny(Shader::IR::Attribute::Param29) ||
+         vs_info->stores.GetAny(Shader::IR::Attribute::Param30) ||
+         vs_info->stores.GetAny(Shader::IR::Attribute::Param31))) {
+        LOG_WARNING(Render_Vulkan,
+                    "FSR 4.1.1 object motion: VS {:#x} uses varyings 29-31, no motion",
+                    vs_info->pgm_hash);
+        motion_vetoed_.push_back(regs.vs_program.Address<const u32*>());
+        // The stamped runtime infos and slot 7's write mask still hold the first pass's choice.
+        for (auto& slot : ri_stamp) {
+            slot.valid = false;
+        }
+        key.write_masks[Shader::MotionVectors::Output] = {};
+        return !track_hash_diff && RefreshGraphicsStages(false);
+    }
     if (!instance.IsVertexInputDynamicState() && vs_info && fetch_shader_ref) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
         // Stride will still be handled outside the pipeline using dynamic state.

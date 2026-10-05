@@ -24,6 +24,10 @@ public:
     ObjectMotion(const Instance& instance, Scheduler& scheduler);
     ~ObjectMotion();
 
+    /// Allocates the position history on the first call (the first FSR frame of GR2), so that
+    /// other games and FSR-off sessions never do; Enabled() tells whether it worked.
+    void Enable();
+
     [[nodiscard]] bool Enabled() const {
         return positions_address != 0;
     }
@@ -50,8 +54,9 @@ public:
     bool PrepareRead(u32 width, u32 height);
 
     /// At the end of a frame FSR ran on, after the merge pass read the image: sizes the image to
-    /// the scene, clears it and moves the history on. True when the image was (re)created.
-    bool EndFrame(u32 width, u32 height);
+    /// the scene, clears it and moves the history on (`gap`: forgets it). True when the image
+    /// was (re)created.
+    bool EndFrame(u32 width, u32 height, bool gap);
 
     u64 draws{};   ///< motion-pipeline draws, for the statistics
     u64 blended{}; ///< of those, blended or without depth writes: not tracked
@@ -67,6 +72,7 @@ private:
     vk::Buffer positions_buffer{};
     VmaAllocation positions_allocation{};
     u64 positions_address{};
+    bool tried{};
 
     u64 frame{};
     VideoCore::UniqueImage image;

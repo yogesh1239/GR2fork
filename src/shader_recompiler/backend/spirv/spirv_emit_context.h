@@ -260,7 +260,8 @@ public:
     Id motion_in_prev{};
     Id motion_frag_out{};
     [[nodiscard]] bool VertexMotion() const {
-        // ponytail: fixed varying locations; a shader using the top params goes without.
+        // Fixed varying locations: a VS that declares the top params goes without, and the
+        // pipeline cache then resolves its FS without motion too (RefreshGraphicsStages).
         return sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex &&
                runtime_info.hw.vs.motion_vectors && !info.stores.GetAny(IR::Attribute::Param29) &&
                !info.stores.GetAny(IR::Attribute::Param30) &&

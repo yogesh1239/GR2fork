@@ -155,6 +155,7 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
     }
     const vk::Device device = instance.GetDevice();
     const u32 width = frame.color.width, height = frame.color.height;
+    const bool gap = frame.reset;
     const bool create = !upscaled || upscaled.image_ci.extent.width != width ||
                         upscaled.image_ci.extent.height != height;
     if (create) {
@@ -192,11 +193,11 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
         };
         make(upscaled, upscaled_view, vk::Format::eR16G16B16A16Sfloat);
         make(merged, merged_view, vk::Format::eR16G16Sfloat);
-        // Unwritten until the first merge: FSR resets its history on this frame, which makes
-        // the marks of that merge void.
+        // Unwritten until the first merge: cover_valid keeps the marks off until then.
         for (u32 i = 0; i < cover.size(); ++i) {
             make(cover[i], cover_views[i], vk::Format::eR8Unorm);
         }
+        cover_valid = false;
         frame.reset = true;
     }
     if (!store.pipeline) {
@@ -211,7 +212,6 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
         }));
         store = CreatePass(FSR411_STORE_COMP, 2, 1);
         merge = CreatePass(FSR411_MOTION_COMP, 4, 2, true);
-        motion_view = CreatePass(FSR411_MOTION_VIEW_COMP, 4, 1);
         if (const char* profile = std::getenv("BB_FSR4_PROFILE"); profile && profile[0] == '1') {
             merge_queries = Check<"fsr411 merge queries">(device.createQueryPoolUnique({
                 .queryType = vk::QueryType::eTimestamp,
@@ -251,11 +251,9 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
         .pImageMemoryBarriers = init.data(),
     });
 
-    if (object_motion) {
-        // As in Record: this compute state replaces what the dedup caches remember.
-        auto& skipcache = VideoCore::Skipcache::Framework::Instance();
-        skipcache.BumpForeignPipelineGen(1);
-        skipcache.BumpForeignPushGen(1);
+    if (!object_motion) {
+        cover_valid = false;
+    } else {
         // Last frame's cover in, this frame's out.
         const u32 last = cover_index;
         cover_index ^= 1;
@@ -273,11 +271,14 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
             cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *merge_queries,
                                    2 * merge_slot);
         }
-        Dispatch(cmdbuf, merge, infos, 4, width, height, mark_uncovered ? 1u : 0u);
+        const bool marks = mark_uncovered && cover_valid && !gap;
+        Dispatch(cmdbuf, merge, infos, 4, width, height, marks ? 1u : 0u);
+        // After a gap, the object image may hold an older frame's characters.
+        cover_valid = !gap;
         if (merge_queries) {
             cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *merge_queries,
                                    2 * merge_slot + 1);
-            merge_marks[merge_slot] = mark_uncovered ? 1 : 0;
+            merge_marks[merge_slot] = marks ? 1 : 0;
             merge_slot = (merge_slot + 1) % MergeSlots;
         }
         const vk::MemoryBarrier2 written{
@@ -297,6 +298,9 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageV
                 {.imageView = *merged_view, .imageLayout = vk::ImageLayout::eGeneral},
                 {.imageView = output, .imageLayout = vk::ImageLayout::eGeneral},
             }};
+            if (!motion_view.pipeline) {
+                motion_view = CreatePass(FSR411_MOTION_VIEW_COMP, 4, 1);
+            }
             Dispatch(cmdbuf, motion_view, shown, 4, width, height);
             skipped = true;
             return true;
@@ -406,6 +410,10 @@ void Fsr411Pass::CollectMergeTime() {
 void Fsr411Pass::Dispatch(vk::CommandBuffer cmdbuf, const Pass& pass,
                           std::span<const vk::DescriptorImageInfo> images, u32 samplers, u32 width,
                           u32 height, u32 push) {
+    // As in Record: this compute state replaces what the dedup caches remember.
+    auto& skipcache = VideoCore::Skipcache::Framework::Instance();
+    skipcache.BumpForeignPipelineGen(1);
+    skipcache.BumpForeignPushGen(1);
     std::array<vk::WriteDescriptorSet, 6> writes{};
     ASSERT(images.size() <= writes.size());
     for (u32 i = 0; i < images.size(); ++i) {

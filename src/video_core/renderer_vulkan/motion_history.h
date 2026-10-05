@@ -215,9 +215,14 @@ public:
         uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{};
     } stats;
 
-    void NextFrame() {
+    /// `forget`: the frame that ends follows a gap (FSR off, a load), so its records may span
+    /// several frames; the next frame then matches nothing.
+    void NextFrame(bool forget = false) {
         previous.swap(current);
         current.clear();
+        if (forget) {
+            previous.clear();
+        }
         occurrences.clear();
         ++frame;
         used = 0;

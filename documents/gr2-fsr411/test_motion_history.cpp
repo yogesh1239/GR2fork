@@ -41,6 +41,8 @@ int main() {
     history.NextFrame(); // a missing frame invalidates the match
     history.NextFrame();
     assert(!history.Prepare(draw).load);
+    history.NextFrame(true); // a gap forgets the frame that ends too
+    assert(!history.Prepare(draw).load);
 
     // A changed index buffer may reference formerly unused holes inside the same min/max.
     // Do not accept that history merely because its addresses/counts stayed the same.

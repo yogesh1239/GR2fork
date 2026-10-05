@@ -259,7 +259,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     if (EmulatorSettings.IsFsr411Enabled()) {
         fsr411_pass.SelfTest(EmulatorSettings.GetWindowWidth(), EmulatorSettings.GetWindowHeight());
     }
-    pipeline_cache.SetObjectMotion(object_motion.Enabled());
 }
 
 Rasterizer::~Rasterizer() {
@@ -1003,11 +1002,17 @@ void Rasterizer::DispatchDirect() {
     bool fsr = false;
     if (cs.pgm_hash == Gr2AaHash) {
         Fsr411TestStep();
-        fsr = EmulatorSettings.IsFsr411Enabled() && fsr411_test_mode_ != 3 && RunFsr411();
+        const bool enabled = EmulatorSettings.IsFsr411Enabled();
+        fsr = enabled && fsr411_test_mode_ != 3 && RunFsr411();
+        fsr411_continuous = fsr;
         // No jitter while the game's AA runs (FSR off, or the guard refused the dispatch).
         if (!fsr) {
             fsr411_depth = {};
         }
+        // The menu switch, and a permanent FSR failure, reach the character pipelines from the
+        // next frame on; a frame the guard refuses keeps them.
+        pipeline_cache.SetObjectMotion(enabled && fsr411_pass.IsAvailable() &&
+                                       object_motion.Enabled());
         DebugState.fsr411_state.store(fsr ? 2u + (fsr411_jittered_draws != 0) : 1u,
                                       std::memory_order_relaxed);
         DebugState.fsr411_frames.store(fsr411_runs, std::memory_order_relaxed);
@@ -1085,8 +1090,10 @@ bool Rasterizer::RunFsr411() {
                              static_cast<VkImageView>(view), size.width, size.height,
                              static_cast<VkImageLayout>(image_infos[i].imageLayout)};
     };
-    // ponytail: a gap in flips stands for a load or a menu; camera cuts keep the history.
-    const bool reset = fsr411_runs == 0 || fsr411_flips > 4;
+    // A gap: the last AA dispatch ran the game's AA (FSR off, test mode 3, a refused dispatch),
+    // or many flips passed without one (a load or a menu). The characters' history and the
+    // marks start again too. ponytail: camera cuts keep the history.
+    const bool reset = !fsr411_continuous || fsr411_flips > 4;
     const float sharpness = EmulatorSettings.GetFsr411Sharpness() / 100.0f;
     // The jitter the scene drew with; none on the first frame (the depth was not known yet).
     // GR2_FSR411_INVERT_JITTER flips the sign given to FSR, for a test of the convention.
@@ -1095,6 +1102,7 @@ bool Rasterizer::RunFsr411() {
     const float sign = jitter_sign;
     // The characters' vectors over the game's (test mode 1: without the marks of uncovered
     // background; 2 shows the game's image).
+    object_motion.Enable();
     const bool object =
         fsr411_test_mode_ != 2 && object_motion.PrepareRead(size.width, size.height);
     const auto view = fsr411_test_mode_ == 2   ? Fsr411Pass::AaView::Input
@@ -1118,7 +1126,7 @@ bool Rasterizer::RunFsr411() {
         return false;
     }
     // The cached render state may hold the view of a replaced image.
-    if (object_motion.Enabled() && object_motion.EndFrame(size.width, size.height)) {
+    if (object_motion.Enabled() && object_motion.EndFrame(size.width, size.height, reset)) {
         br_cache_.valid = false;
     }
     if (frame.reset && fsr411_resets++ < 50) {

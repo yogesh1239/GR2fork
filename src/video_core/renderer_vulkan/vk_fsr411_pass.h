@@ -41,7 +41,9 @@ public:
 
     /// In place of the game's AA: FSR at the size of frame.color into an RGBA16F image, then a
     /// store pass writes it sRGB-encoded, with the alpha of frame.color, into `output` (a
-    /// storage view in General). Sets frame.output; a size change sets frame.reset. With
+    /// storage view in General). frame.reset on entry means a gap in the frames (no marks; the
+    /// cover of this frame is not trusted either). Sets frame.output; a size change sets
+    /// frame.reset. With
     /// `object_motion` (ObjectMotion's image, General, read barrier recorded), a merge pass first
     /// lays its vectors over frame.motion and, with `mark_uncovered`, takes the history from the
     /// background the characters uncover (fsr411_motion.comp); FSR reads the result. FSR's first
@@ -80,6 +82,7 @@ private:
     std::array<VideoCore::UniqueImage, 2> cover;
     std::array<vk::UniqueImageView, 2> cover_views;
     u32 cover_index{};
+    bool cover_valid{}; ///< the last frame's merge wrote cover[cover_index] for this frame
     vk::UniqueSampler sampler;
     Pass store;
     Pass merge;
