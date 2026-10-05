@@ -305,18 +305,29 @@ struct PushData {
     static constexpr u32 XScaleIndex = 2;
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 BufOffsetIndex = 4;
+    /// Object motion (FSR 4.1.1): first of the 6 u32 members, then the u64 member.
+    static constexpr u32 MotionIndex = 7;
+    static constexpr u32 MotionPositionsIndex = 13;
 
     float xoffset;
     float yoffset;
     float xscale;
     float yscale;
     std::array<u8, NUM_BUFFERS> buf_offsets;
+    /// Per draw: store and load slots in `motion_positions` (0 = none), the vertex range
+    /// [first_vertex, first_vertex + vertices) and the instance range of the draw.
+    struct Motion {
+        u32 store, load, vertices, first_vertex, first_instance, instances;
+    } motion;
+    u64 motion_positions; ///< buffer device address of the clip-position history (vec4)
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };
+// The SPIR-V block (DefinePushDataBlock) declares these offsets.
+static_assert(offsetof(PushData, motion) == 56 && offsetof(PushData, motion_positions) == 80);
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
 

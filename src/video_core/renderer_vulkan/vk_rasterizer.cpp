@@ -7,6 +7,7 @@
 #include <limits>
 
 #include <boost/container/throw_exception.hpp>
+#include <xxhash.h>
 
 #include "common/rdtsc.h"
 
@@ -118,10 +119,10 @@ void Rasterizer::SelectDrawJitter(bool full_screen) {
     fsr411_jittered_draws += on;
 }
 
-// A comparison for a still camera, started with the Home key: the 4 test modes in a row, each
-// for 90 AA passes to settle, then 8 game-only screenshots of consecutive frames.
+// A comparison, started with the Home key: the 5 test modes in a row, each for 90 AA passes to
+// settle, then 8 game-only screenshots of consecutive frames.
 void Rasterizer::Fsr411TestStep() {
-    constexpr u32 Settle = 90, Shots = 8, Modes = 4;
+    constexpr u32 Settle = 90, Shots = 8, Modes = 5;
     if (fsr411_test_frame_ == 0 && !DebugState.fsr411_test_request.exchange(false)) {
         return;
     }
@@ -147,7 +148,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       texture_cache{instance, scheduler, runtime, liverpool_, buffer_cache, page_manager},
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
-      fsr411_pass{instance, scheduler},
+      fsr411_pass{instance, scheduler}, object_motion{instance, scheduler},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     if (!EmulatorSettings.IsNullGPU()) {
@@ -258,6 +259,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     if (EmulatorSettings.IsFsr411Enabled()) {
         fsr411_pass.SelfTest(EmulatorSettings.GetWindowWidth(), EmulatorSettings.GetWindowHeight());
     }
+    pipeline_cache.SetObjectMotion(object_motion.Enabled());
 }
 
 Rasterizer::~Rasterizer() {
@@ -710,6 +712,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (is_indexed) {
         BindIndexBuffer(index_offset);
     }
+    if (pipeline->GetGraphicsKey().motion_vectors) {
+        PrepareMotion(pipeline, *state, is_indexed, index_offset);
+    }
 
     if (needs_barrier) {
         runtime.FlushBarriers();
@@ -1087,7 +1092,14 @@ bool Rasterizer::RunFsr411() {
     // GR2_FSR411_INVERT_JITTER flips the sign given to FSR, for a test of the convention.
     static const float jitter_sign = std::getenv("GR2_FSR411_INVERT_JITTER") ? -1.0f : 1.0f;
     const auto jitter = Fsr411Jitter(fsr411_jittered_draws ? fsr411_jitter_index : 0);
-    const float sign = fsr411_test_mode_ == 1 ? -jitter_sign : jitter_sign;
+    const float sign = jitter_sign;
+    // The characters' vectors over the game's (test mode 1: without the marks of uncovered
+    // background; 2 shows the game's image).
+    const bool object =
+        fsr411_test_mode_ != 2 && object_motion.PrepareRead(size.width, size.height);
+    const auto view = fsr411_test_mode_ == 2   ? Fsr411Pass::AaView::Input
+                      : fsr411_test_mode_ == 4 ? Fsr411Pass::AaView::Motion
+                                               : Fsr411Pass::AaView::Fsr;
     Fsr411::Frame frame{
         .color = input(0, image_infos[0].imageView),
         .depth = input(1, images[1]->FindViewHandle(depth_info)),
@@ -1099,8 +1111,15 @@ bool Rasterizer::RunFsr411() {
         .sharpen = sharpness > 0.0f,
         .reset = reset,
     };
-    if (!fsr411_pass.RecordAa(frame, image_infos[4].imageView)) {
+    if (!fsr411_pass.RecordAa(frame, image_infos[4].imageView,
+                              object ? object_motion.View(size.width, size.height)
+                                     : vk::ImageView{},
+                              view, fsr411_test_mode_ != 1)) {
         return false;
+    }
+    // The cached render state may hold the view of a replaced image.
+    if (object_motion.Enabled() && object_motion.EndFrame(size.width, size.height)) {
+        br_cache_.valid = false;
     }
     if (frame.reset && fsr411_resets++ < 50) {
         LOG_INFO(Render_Vulkan, "FSR 4.1.1: history reset {} after {} flips", fsr411_resets,
@@ -1120,6 +1139,67 @@ bool Rasterizer::RunFsr411() {
     fsr411_jitter_index = fsr411_jitter_index % 8 + 1;
     ++fsr411_runs;
     return true;
+}
+
+// FSR 4.1.1 object motion: a motion pipeline's draw gets history slots on the scene of a frame FSR
+// runs on (frames end at the AA dispatch). Its identity across frames: the vertex shader, the
+// vertex buffer descriptors, the index list (address and contents), counts, offsets, and the
+// number of identical draws before it in the frame (motion_history.h). No blended draws:
+// particles and effects would write vectors of respawned or rewritten vertices. (GR2's ink
+// outline is a geometry-shader pass, outside the selection; FSR's 3x3 pick covers its 1 pixel.)
+void Rasterizer::PrepareMotion(const GraphicsPipeline* pipeline, const RenderState& state,
+                               bool is_indexed, u32 index_offset) {
+    ++object_motion.draws;
+    if (!fsr411_depth || db_desc.first != fsr411_depth || !motion_geometry_ ||
+        !state.color_attachments[Shader::MotionVectors::Output].image_view) {
+        return;
+    }
+    const auto& regs = liverpool->regs;
+    const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+    if ((regs.blend_control[0].enable && !regs.color_buffers[0].info.blend_bypass) ||
+        !regs.depth_control.depth_write_enable) {
+        ++object_motion.blended;
+        return;
+    }
+    const auto [base_vertex, first_instance] = GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
+    const u32 count = regs.num_indices;
+    Motion::VertexRange range{base_vertex, count};
+    VAddr index_address = 0;
+    u64 topology = 0;
+    if (is_indexed) {
+        const u32 index_size =
+            regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16 ? 2u : 4u;
+        index_address = regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size;
+        const u64 bytes = u64(count) * index_size;
+        if (!memory->IsValidGpuMapping(index_address, 0) ||
+            memory->ClampRangeSize(index_address, bytes) != bytes) {
+            return;
+        }
+        const bool restart = regs.enable_primitive_restart != 0;
+        const auto scanned = object_motion.IndexRange(
+            {index_address, count, index_size, s32(base_vertex), restart}, [&] {
+                const auto* data = reinterpret_cast<const void*>(index_address);
+                const auto found =
+                    index_size == 2
+                        ? Motion::IndexedRange(std::span(static_cast<const u16*>(data), count),
+                                               s32(base_vertex), restart)
+                        : Motion::IndexedRange(std::span(static_cast<const u32*>(data), count),
+                                               s32(base_vertex), restart);
+                return Motion::IndexRangeCache::Result{found, XXH3_64bits(data, bytes)};
+            });
+        range = scanned.range;
+        topology = scanned.topology;
+    }
+    push_data.motion = object_motion.PrepareDraw({
+        .shader = vs.pgm_hash,
+        .geometry = motion_geometry_,
+        .indices = index_address,
+        .topology = topology,
+        .index_count = count,
+        .instances = regs.num_instances.NumInstances(),
+        .first_instance = first_instance,
+        .vertices = range,
+    });
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -1716,6 +1796,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     } else {
         push_data = MakeUserData(liverpool->regs);
     }
+    // Object motion: none unless Draw's PrepareMotion names slots.
+    push_data.motion = {};
+    push_data.motion_positions = object_motion.Positions();
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1914,6 +1997,13 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
             vertex_input_bindings_ = input_bindings;
             vertex_input_attributes_ = input_attributes;
         }
+    }
+
+    if (pipeline->GetGraphicsKey().motion_vectors) {
+        motion_geometry_ =
+            guest_buffers.empty()
+                ? 0
+                : XXH3_64bits(guest_buffers.data(), guest_buffers.size() * sizeof(AmdGpu::Buffer));
     }
 
     // One sharp per fetch attribute, as many as there are bindings.
@@ -3098,6 +3188,17 @@ const RenderState& Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) 
 
     if (state.num_layers == std::numeric_limits<u16>::max()) {
         state.num_layers = 1;
+    }
+
+    // FSR 4.1.1 object motion: the image only on the scene of a frame FSR runs on, single-layer
+    // and inside it. Elsewhere the slot stays empty (dynamicRenderingUnusedAttachments).
+    if (key.motion_vectors && fsr411_depth && db_desc.first == fsr411_depth &&
+        state.num_layers == 1) {
+        if (const auto view = object_motion.View(state.width, state.height)) {
+            auto& attachment = state.color_attachments[Shader::MotionVectors::Output];
+            attachment.image_view = view;
+            attachment.image_layout = vk::ImageLayout::eGeneral;
+        }
     }
 
     if (br_probing) {

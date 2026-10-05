@@ -1,0 +1,115 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#version 450
+
+// FSR 4.1.1 object motion: lays the characters' vectors (ObjectMotion) over GR2's velocity
+// image, which holds none for them. Both are previous minus current NDC, y up.
+//
+// FSR 4.1.1 has no depth test between frames: its prepass reads depth only to pick the nearest
+// of 3x3 vectors, and the network sees colours alone. Background that a character uncovers keeps
+// the character's old colours where both are dark (the trail behind Kat's cape and feet). So
+// this pass marks it: a pixel off the characters whose previous position (the game's vector)
+// lay on one last frame gets a vector off the screen, which the prepass treats as at a screen
+// edge: no history. `cover` keeps this frame's character pixels, grown by the 1 pixel that FSR's
+// 3x3 pick gives their vectors, for the next frame.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D game_motion;
+layout(binding = 1) uniform sampler2D scene_depth;
+// rg the vector, b the depth of the fragment that wrote it, a its validity.
+layout(binding = 2) uniform sampler2D object_motion;
+layout(binding = 3) uniform sampler2D last_cover;
+layout(binding = 4, rg16f) uniform writeonly image2D merged;
+layout(binding = 5, r8) uniform writeonly image2D cover;
+
+layout(push_constant) uniform Push {
+    uint mark; // 0 in test mode 1: no marks
+};
+
+// 2 screens away in UV, finite (the prepass drops vectors over 1e6 and NaN as no motion).
+const vec2 Unseen = vec2(4.0, -4.0);
+
+// The tiles of the group's 8x8 pixels: characters with a 2 pixel border, marks with 1.
+shared bool character_tile[12][12];
+shared bool uncovered_tile[10][10];
+
+ivec2 size;
+
+bool Inside(ivec2 pos) {
+    return all(greaterThanEqual(pos, ivec2(0))) && all(lessThan(pos, size));
+}
+
+// A later draw outside the motion pipelines may have covered the pixel: then the scene depth is
+// nearer than the stored one. 1 % of (1 - depth) is about 1 % of the view distance (bbport's
+// tolerance), so a far vector is not kept for a near surface just in front of it.
+bool Character(ivec2 pos) {
+    if (!Inside(pos)) {
+        return false;
+    }
+    const vec4 object = texelFetch(object_motion, pos, 0);
+    const float depth = texelFetch(scene_depth, pos, 0).r;
+    return object.a > 0.5 && object.b <= depth + max(2e-7, (1.0 - depth) * 0.01) &&
+           !any(isnan(object.rg)) && !any(isinf(object.rg));
+}
+
+// Whether the pixel's previous position was on a character. One texel: the cover's 1 pixel
+// growth gives the slack for FSR's history filter.
+bool WasCovered(ivec2 pos) {
+    const vec2 motion = texelFetch(game_motion, pos, 0).rg;
+    if (any(isnan(motion)) || any(isinf(motion))) {
+        return false;
+    }
+    const ivec2 previous = ivec2(floor(vec2(pos) + 0.5 + motion * vec2(0.5, -0.5) * vec2(size)));
+    return Inside(previous) && texelFetch(last_cover, previous, 0).r > 0.5;
+}
+
+bool AnyCharacter3x3(ivec2 tile) {
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            if (character_tile[tile.y + y][tile.x + x]) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void main() {
+    size = imageSize(merged);
+    const ivec2 group = ivec2(gl_WorkGroupID.xy) * 8;
+    for (uint i = gl_LocalInvocationIndex; i < 144; i += 64) {
+        const ivec2 tile = ivec2(i % 12, i / 12);
+        character_tile[tile.y][tile.x] = Character(group - 2 + tile);
+    }
+    barrier();
+    // Uncovered: off the characters and their 1 pixel border, and on one last frame.
+    for (uint i = gl_LocalInvocationIndex; i < 100; i += 64) {
+        const ivec2 tile = ivec2(i % 10, i / 10);
+        const ivec2 pos = group - 1 + tile;
+        uncovered_tile[tile.y][tile.x] =
+            mark != 0 && Inside(pos) && !AnyCharacter3x3(tile) && WasCovered(pos);
+    }
+    barrier();
+
+    const ivec2 local = ivec2(gl_LocalInvocationID.xy);
+    const ivec2 pos = group + local;
+    if (!Inside(pos)) {
+        return;
+    }
+    const bool character = character_tile[local.y + 2][local.x + 2];
+    // FSR takes the vector of the nearest of 3x3 pixels: the marks grow by 1 pixel so that an
+    // uncovered pixel cannot pick an unmarked neighbour's.
+    bool uncovered = false;
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            uncovered = uncovered || uncovered_tile[local.y + y][local.x + x];
+        }
+    }
+    const vec2 motion = character   ? texelFetch(object_motion, pos, 0).rg
+                        : uncovered ? Unseen
+                                    : texelFetch(game_motion, pos, 0).rg;
+    imageStore(merged, pos, vec4(motion, 0.0, 0.0));
+    imageStore(cover, pos, vec4(AnyCharacter3x3(local + 1) ? 1.0 : 0.0));
+}

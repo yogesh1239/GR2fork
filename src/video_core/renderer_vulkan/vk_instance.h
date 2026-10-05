@@ -452,6 +452,11 @@ public:
         return supports_block_texel_view;
     }
 
+    /// Returns whether a color attachment may be null where the pipeline has a format.
+    bool IsUnusedAttachmentsSupported() const {
+        return unused_attachments;
+    }
+
     /// Returns whether VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT is supported on 3D images
     bool Is2dViewOf3dSupported() const {
         return image_2d_view_of_3d && image_2d_view_of_3d_features.image2DViewOf3D &&
@@ -558,6 +563,7 @@ private:
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
+    bool unused_attachments{};
     bool shader_clock{};
     bool compute_shader_derivatives{};
     bool mixed_float_dot_product{};

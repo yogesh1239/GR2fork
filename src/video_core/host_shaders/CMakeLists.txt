@@ -45,6 +45,8 @@ add_host_shader(fault_buffer_process.comp fault_buffer_process_comp)
 add_host_shader(fs_tri.vert fs_tri_vert)
 add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
+add_host_shader(fsr411_motion.comp fsr411_motion_comp)
+add_host_shader(fsr411_motion_view.comp fsr411_motion_view_comp)
 add_host_shader(fsr411_store.comp fsr411_store_comp)
 add_host_shader(post_process.frag post_process_frag)
 

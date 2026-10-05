@@ -223,6 +223,11 @@ public:
         pre_compile_user_ = user;
     }
 
+    /// FSR 4.1.1 object motion: whether draws may get the motion variant (MotionDraw).
+    void SetObjectMotion(bool enabled) {
+        object_motion_ = enabled;
+    }
+
     /// Per-300-frame telemetry drains, called once per window from the rasterizer.
     void DumpKeyReuseStats();
     void DumpProgramIdentityStats();
@@ -278,6 +283,8 @@ private:
     FetchShaderRef fetch_shader_ref{};
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
+    bool object_motion_{};
+    bool motion_sel_{};      ///< MotionDraw() of the draw being resolved; read by its runtime infos
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
     // Persistent probe object for GetProgram; rebuilt in place every lookup.
     Shader::StageSpecialization spec_scratch{};

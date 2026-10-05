@@ -78,6 +78,15 @@ struct SwVertexRuntimeInfo {
     bool operator==(const SwVertexRuntimeInfo& other) const noexcept = default;
 };
 
+/// FSR 4.1.1 object motion (bbport). The vertex shader stores this frame's clip position and
+/// passes it with last frame's one to the fragment shader, which writes the difference to an
+/// extra color attachment. Per-draw parameters come in PushData::motion.
+struct MotionVectors {
+    static constexpr u32 CurrentLocation = 30;  ///< varying: current clip position
+    static constexpr u32 PreviousLocation = 31; ///< varying: previous clip position, z = valid
+    static constexpr u32 Output = 7;            ///< color attachment index
+};
+
 struct HwLocalRuntimeInfo {
     u32 ls_stride;
 
@@ -95,6 +104,7 @@ struct HwVertexRuntimeInfo {
     std::array<OutputMap, 3> outputs;
     bool emulate_depth_negative_one_to_one{};
     bool clip_disable{};
+    bool motion_vectors{}; ///< in the padding: older cached infos read false
     u32 user_clip_plane_mask{};
 
     bool operator==(const HwVertexRuntimeInfo& other) const noexcept = default;
@@ -209,7 +219,8 @@ struct HwFragmentRuntimeInfo {
     u32 dual_source_blending : 1;
     u32 clip_distance_emulation : 1;
     u32 depth_before_shader : 1;
-    u32 : 12;
+    u32 motion_vectors : 1;
+    u32 : 11;
 
     bool operator==(const HwFragmentRuntimeInfo& other) const noexcept {
         // Scalar compares run before the array walks so mismatches reject cheaply.
@@ -220,6 +231,7 @@ struct HwFragmentRuntimeInfo {
                dual_source_blending == other.dual_source_blending &&
                clip_distance_emulation == other.clip_distance_emulation &&
                depth_before_shader == other.depth_before_shader &&
+               motion_vectors == other.motion_vectors &&
                std::ranges::equal(color_buffers, other.color_buffers) &&
                std::ranges::equal(inputs.begin(), inputs.begin() + num_inputs, other.inputs.begin(),
                                   other.inputs.begin() + num_inputs);

@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#version 450
+
+// FSR 4.1.1 test mode 4: the characters' vectors, as colour in place of the AA output.
+// Where a character wrote one: r, g = 0.5 + the vector in pixels (x right, y down) / 64, clamped
+// to +-32 pixels; b = 1 where the merge uses it, 0.5 where it refuses it. Red: the merge marked
+// the pixel as uncovered (no history). Elsewhere the game's image in grey on r and g, with b = 0.
+// Top left, 256 x 48 pixels: ramps of r, g and b (value x / 255), to measure what the game's
+// passes after the AA do to these bytes.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D game_color;
+layout(binding = 1) uniform sampler2D scene_depth;
+layout(binding = 2) uniform sampler2D object_motion;
+layout(binding = 3) uniform sampler2D merged;
+layout(binding = 4, rgba8) uniform writeonly image2D game_output;
+
+void main() {
+    const ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(game_output);
+    if (any(greaterThanEqual(pos, size))) {
+        return;
+    }
+    if (pos.x < 256 && pos.y < 48) {
+        vec4 ramp = vec4(0.0, 0.0, 0.0, 1.0);
+        ramp[pos.y / 16] = float(pos.x) / 255.0;
+        imageStore(game_output, pos, ramp);
+        return;
+    }
+    // fsr411_motion.comp's Unseen.
+    if (texelFetch(merged, pos, 0).r > 3.5) {
+        imageStore(game_output, pos, vec4(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    const vec4 object = texelFetch(object_motion, pos, 0);
+    if (object.a <= 0.5) {
+        const float grey = pow(dot(texelFetch(game_color, pos, 0).rgb, vec3(0.2126, 0.7152, 0.0722)),
+                               1.0 / 2.2);
+        imageStore(game_output, pos, vec4(grey, grey, 0.0, 1.0));
+        return;
+    }
+    const float depth = texelFetch(scene_depth, pos, 0).r;
+    // The rule of fsr411_motion.comp.
+    const bool used = object.b <= depth + max(2e-7, (1.0 - depth) * 0.01) &&
+                      !any(isnan(object.rg)) && !any(isinf(object.rg));
+    const vec2 pixels = object.rg * vec2(0.5, -0.5) * vec2(size);
+    imageStore(game_output, pos,
+               vec4(0.5 + clamp(pixels / 64.0, -0.5, 0.5), used ? 1.0 : 0.5, 1.0));
+}

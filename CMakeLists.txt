@@ -1180,6 +1180,9 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.h
                src/video_core/renderer_vulkan/vk_fsr411_pass.cpp
                src/video_core/renderer_vulkan/vk_fsr411_pass.h
+               src/video_core/renderer_vulkan/vk_object_motion.cpp
+               src/video_core/renderer_vulkan/vk_object_motion.h
+               src/video_core/renderer_vulkan/motion_history.h
                src/video_core/renderer_vulkan/fsr411/fsr411.cpp
                src/video_core/renderer_vulkan/fsr411/fsr411.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp

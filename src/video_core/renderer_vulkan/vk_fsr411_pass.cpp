@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <cstdlib>
+#include <utility>
 
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "video_core/host_shaders/fsr411_motion_comp.h"
+#include "video_core/host_shaders/fsr411_motion_view_comp.h"
 #include "video_core/host_shaders/fsr411_store_comp.h"
 #include "video_core/renderer_vulkan/vk_fsr411_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -18,7 +22,10 @@ namespace Vulkan {
 
 Fsr411Pass::Fsr411Pass(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_},
-      upscaled{instance_.GetDevice(), instance_.GetAllocator()} {}
+      upscaled{instance_.GetDevice(), instance_.GetAllocator()},
+      merged{instance_.GetDevice(), instance_.GetAllocator()},
+      cover{VideoCore::UniqueImage{instance_.GetDevice(), instance_.GetAllocator()},
+            VideoCore::UniqueImage{instance_.GetDevice(), instance_.GetAllocator()}} {}
 
 Fsr411Pass::~Fsr411Pass() {
     if (!ticks.empty()) {
@@ -141,7 +148,8 @@ bool Fsr411Pass::SelfTest(u32 width, u32 height) {
     return recorded;
 }
 
-bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output) {
+bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageView object_motion,
+                          AaView view, bool mark_uncovered) {
     if (failed) {
         return false;
     }
@@ -156,52 +164,156 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output) {
             ticks.clear();
             upscaled_view.reset();
             upscaled.Destroy();
+            merged_view.reset();
+            merged.Destroy();
+            for (u32 i = 0; i < cover.size(); ++i) {
+                cover_views[i].reset();
+                cover[i].Destroy();
+            }
         }
-        upscaled.Create(vk::ImageCreateInfo{
-            .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR16G16B16A16Sfloat,
-            .extent = {width, height, 1},
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
-        });
-        upscaled_view = Check<"fsr411 upscaled view">(device.createImageViewUnique({
-            .image = upscaled,
-            .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR16G16B16A16Sfloat,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
+        const auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
+                              vk::Format format) {
+            image.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = format,
+                .extent = {width, height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+            });
+            view = Check<"fsr411 image view">(device.createImageViewUnique({
+                .image = image,
+                .viewType = vk::ImageViewType::e2D,
+                .format = format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+        };
+        make(upscaled, upscaled_view, vk::Format::eR16G16B16A16Sfloat);
+        make(merged, merged_view, vk::Format::eR16G16Sfloat);
+        // Unwritten until the first merge: FSR resets its history on this frame, which makes
+        // the marks of that merge void.
+        for (u32 i = 0; i < cover.size(); ++i) {
+            make(cover[i], cover_views[i], vk::Format::eR8Unorm);
+        }
         frame.reset = true;
     }
-    if (!store_pipeline) {
-        CreateStorePass();
+    if (!store.pipeline) {
+        sampler = Check<"fsr411 sampler">(device.createSamplerUnique({
+            .magFilter = vk::Filter::eNearest,
+            .minFilter = vk::Filter::eNearest,
+            .mipmapMode = vk::SamplerMipmapMode::eNearest,
+            .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+            .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+            .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+            .maxAnisotropy = 1.0f,
+        }));
+        store = CreatePass(FSR411_STORE_COMP, 2, 1);
+        merge = CreatePass(FSR411_MOTION_COMP, 4, 2, true);
+        motion_view = CreatePass(FSR411_MOTION_VIEW_COMP, 4, 1);
+        if (const char* profile = std::getenv("BB_FSR4_PROFILE"); profile && profile[0] == '1') {
+            merge_queries = Check<"fsr411 merge queries">(device.createQueryPoolUnique({
+                .queryType = vk::QueryType::eTimestamp,
+                .queryCount = 2 * MergeSlots,
+            }));
+            merge_marks.fill(-1);
+            timestamp_ns = instance.GetPhysicalDevice().getProperties().limits.timestampPeriod;
+        }
     }
 
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
-    // The last store pass read `upscaled`, and FSR writes it again.
+    // The last store pass read `upscaled`, the last FSR run `merged` and the last merge `cover`;
+    // all are written again.
     const vk::MemoryBarrier2 reuse{
         .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
         .srcAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
         .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
     };
-    const vk::ImageMemoryBarrier2 init{
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
-        .oldLayout = vk::ImageLayout::eUndefined,
-        .newLayout = vk::ImageLayout::eGeneral,
-        .image = upscaled,
-        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-    };
+    const std::array new_images{upscaled.image, merged.image, cover[0].image, cover[1].image};
+    std::array<vk::ImageMemoryBarrier2, new_images.size()> init;
+    for (u32 i = 0; i < init.size(); ++i) {
+        init[i] = {
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = new_images[i],
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+    }
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .memoryBarrierCount = 1,
         .pMemoryBarriers = &reuse,
-        .imageMemoryBarrierCount = create ? 1u : 0u,
-        .pImageMemoryBarriers = &init,
+        .imageMemoryBarrierCount = create ? static_cast<u32>(init.size()) : 0u,
+        .pImageMemoryBarriers = init.data(),
     });
+
+    if (object_motion) {
+        // As in Record: this compute state replaces what the dedup caches remember.
+        auto& skipcache = VideoCore::Skipcache::Framework::Instance();
+        skipcache.BumpForeignPipelineGen(1);
+        skipcache.BumpForeignPushGen(1);
+        // Last frame's cover in, this frame's out.
+        const u32 last = cover_index;
+        cover_index ^= 1;
+        const std::array<vk::DescriptorImageInfo, 6> infos{{
+            {.imageView = frame.motion.view, .imageLayout = vk::ImageLayout(frame.motion.layout)},
+            {.imageView = frame.depth.view, .imageLayout = vk::ImageLayout(frame.depth.layout)},
+            {.imageView = object_motion, .imageLayout = vk::ImageLayout::eGeneral},
+            {.imageView = *cover_views[last], .imageLayout = vk::ImageLayout::eGeneral},
+            {.imageView = *merged_view, .imageLayout = vk::ImageLayout::eGeneral},
+            {.imageView = *cover_views[cover_index], .imageLayout = vk::ImageLayout::eGeneral},
+        }};
+        if (merge_queries) {
+            CollectMergeTime();
+            cmdbuf.resetQueryPool(*merge_queries, 2 * merge_slot, 2);
+            cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *merge_queries,
+                                   2 * merge_slot);
+        }
+        Dispatch(cmdbuf, merge, infos, 4, width, height, mark_uncovered ? 1u : 0u);
+        if (merge_queries) {
+            cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *merge_queries,
+                                   2 * merge_slot + 1);
+            merge_marks[merge_slot] = mark_uncovered ? 1 : 0;
+            merge_slot = (merge_slot + 1) % MergeSlots;
+        }
+        const vk::MemoryBarrier2 written{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+        frame.motion = {static_cast<VkImage>(merged.image), static_cast<VkImageView>(*merged_view),
+                        width, height};
+        if (view == AaView::Motion) {
+            const std::array<vk::DescriptorImageInfo, 5> shown{{
+                {.imageView = frame.color.view, .imageLayout = vk::ImageLayout(frame.color.layout)},
+                infos[1],
+                infos[2],
+                {.imageView = *merged_view, .imageLayout = vk::ImageLayout::eGeneral},
+                {.imageView = output, .imageLayout = vk::ImageLayout::eGeneral},
+            }};
+            Dispatch(cmdbuf, motion_view, shown, 4, width, height);
+            skipped = true;
+            return true;
+        }
+    }
+    if (view == AaView::Input) {
+        // The store pass encodes the sRGB-decoded colour again: the game's bytes, unchanged.
+        const std::array<vk::DescriptorImageInfo, 3> shown{{
+            {.imageView = frame.color.view, .imageLayout = vk::ImageLayout(frame.color.layout)},
+            {.imageView = frame.color.view, .imageLayout = vk::ImageLayout(frame.color.layout)},
+            {.imageView = output, .imageLayout = vk::ImageLayout::eGeneral},
+        }};
+        Dispatch(cmdbuf, store, shown, 2, width, height);
+        skipped = true;
+        return true;
+    }
+    frame.reset |= std::exchange(skipped, false);
 
     frame.output = {static_cast<VkImage>(upscaled.image), static_cast<VkImageView>(*upscaled_view),
                     width, height};
@@ -217,55 +329,42 @@ bool Fsr411Pass::RecordAa(Fsr411::Frame& frame, vk::ImageView output) {
         {.imageView = frame.color.view, .imageLayout = vk::ImageLayout(frame.color.layout)},
         {.imageView = output, .imageLayout = vk::ImageLayout::eGeneral},
     }};
-    std::array<vk::WriteDescriptorSet, 3> writes{};
-    for (u32 i = 0; i < writes.size(); ++i) {
-        writes[i] = {
-            .dstBinding = i,
-            .descriptorCount = 1,
-            .descriptorType = i < 2 ? vk::DescriptorType::eCombinedImageSampler
-                                    : vk::DescriptorType::eStorageImage,
-            .pImageInfo = &infos[i],
-        };
-    }
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *store_pipeline);
-    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *store_layout, 0, writes);
-    cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    Dispatch(cmdbuf, store, infos, 2, width, height);
     return true;
 }
 
-void Fsr411Pass::CreateStorePass() {
+Fsr411Pass::Pass Fsr411Pass::CreatePass(std::span<const u32> code, u32 samplers, u32 storages,
+                                        bool push) {
     const vk::Device device = instance.GetDevice();
-    store_sampler = Check<"fsr411 store sampler">(device.createSamplerUnique({
-        .magFilter = vk::Filter::eNearest,
-        .minFilter = vk::Filter::eNearest,
-        .mipmapMode = vk::SamplerMipmapMode::eNearest,
-        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
-        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
-        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
-        .maxAnisotropy = 1.0f,
-    }));
-    const vk::Sampler sampler = *store_sampler;
-    std::array<vk::DescriptorSetLayoutBinding, 3> bindings{};
-    for (u32 i = 0; i < bindings.size(); ++i) {
+    const vk::Sampler immutable = *sampler;
+    std::array<vk::DescriptorSetLayoutBinding, 6> bindings{};
+    const u32 count = samplers + storages;
+    ASSERT(count <= bindings.size());
+    for (u32 i = 0; i < count; ++i) {
         bindings[i] = {
             .binding = i,
-            .descriptorType = i < 2 ? vk::DescriptorType::eCombinedImageSampler
-                                    : vk::DescriptorType::eStorageImage,
+            .descriptorType = i < samplers ? vk::DescriptorType::eCombinedImageSampler
+                                           : vk::DescriptorType::eStorageImage,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
-            .pImmutableSamplers = i < 2 ? &sampler : nullptr,
+            .pImmutableSamplers = i < samplers ? &immutable : nullptr,
         };
     }
-    store_set_layout = Check<"fsr411 store set layout">(device.createDescriptorSetLayoutUnique({
+    Pass pass;
+    pass.set_layout = Check<"fsr411 set layout">(device.createDescriptorSetLayoutUnique({
         .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor,
-        .bindingCount = static_cast<u32>(bindings.size()),
+        .bindingCount = count,
         .pBindings = bindings.data(),
     }));
-    store_layout = Check<"fsr411 store pipeline layout">(device.createPipelineLayoutUnique({
+    const vk::PushConstantRange push_range{vk::ShaderStageFlagBits::eCompute, 0, sizeof(u32)};
+    pass.layout = Check<"fsr411 pipeline layout">(device.createPipelineLayoutUnique({
         .setLayoutCount = 1,
-        .pSetLayouts = &*store_set_layout,
+        .pSetLayouts = &*pass.set_layout,
+        .pushConstantRangeCount = push ? 1u : 0u,
+        .pPushConstantRanges = &push_range,
     }));
-    const vk::ShaderModule module = CompileSPV(FSR411_STORE_COMP, device);
+    pass.push = push;
+    const vk::ShaderModule module = CompileSPV(code, device);
     ASSERT(module);
     const vk::ComputePipelineCreateInfo pipeline_ci{
         .stage{
@@ -273,11 +372,59 @@ void Fsr411Pass::CreateStorePass() {
             .module = module,
             .pName = "main",
         },
-        .layout = *store_layout,
+        .layout = *pass.layout,
     };
-    store_pipeline =
-        Check<"fsr411 store pipeline">(device.createComputePipelineUnique({}, pipeline_ci));
+    pass.pipeline = Check<"fsr411 pipeline">(device.createComputePipelineUnique({}, pipeline_ci));
     device.destroyShaderModule(module);
+    return pass;
+}
+
+void Fsr411Pass::CollectMergeTime() {
+    auto& marks = merge_marks[merge_slot];
+    std::array<u64, 2> ts{};
+    if (marks < 0 || instance.GetDevice().getQueryPoolResults(
+                         *merge_queries, 2 * merge_slot, 2, sizeof(ts), ts.data(), sizeof(u64),
+                         vk::QueryResultFlagBits::e64) != vk::Result::eSuccess) {
+        return; // empty, or not done yet: this sample is lost
+    }
+    merge_ms[marks] += double(ts[1] - ts[0]) * timestamp_ns * 1e-6;
+    ++merge_frames[marks];
+    marks = -1;
+    if ((merge_frames[0] + merge_frames[1]) % 300 == 0) {
+        const auto average = [&](u32 i) {
+            return merge_frames[i] ? merge_ms[i] / merge_frames[i] : 0.0;
+        };
+        LOG_INFO(Render_Vulkan,
+                 "FSR 4.1.1 merge pass (GPU): {:.4f} ms per frame with the marks ({} frames), "
+                 "{:.4f} ms without ({} frames)",
+                 average(1), merge_frames[1], average(0), merge_frames[0]);
+        merge_ms = {};
+        merge_frames = {};
+    }
+}
+
+void Fsr411Pass::Dispatch(vk::CommandBuffer cmdbuf, const Pass& pass,
+                          std::span<const vk::DescriptorImageInfo> images, u32 samplers, u32 width,
+                          u32 height, u32 push) {
+    std::array<vk::WriteDescriptorSet, 6> writes{};
+    ASSERT(images.size() <= writes.size());
+    for (u32 i = 0; i < images.size(); ++i) {
+        writes[i] = {
+            .dstBinding = i,
+            .descriptorCount = 1,
+            .descriptorType = i < samplers ? vk::DescriptorType::eCombinedImageSampler
+                                           : vk::DescriptorType::eStorageImage,
+            .pImageInfo = &images[i],
+        };
+    }
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *pass.pipeline);
+    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pass.layout, 0,
+                                std::span{writes.data(), images.size()});
+    if (pass.push) {
+        cmdbuf.pushConstants(*pass.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
+                             &push);
+    }
+    cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
 } // namespace Vulkan

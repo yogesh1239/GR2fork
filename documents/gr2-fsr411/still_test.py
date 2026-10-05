@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-MODES = ["FSR, jitter", "FSR, jitter sign reversed", "FSR, no jitter", "game AA"]
+MODES = ["FSR", "FSR, no uncovered marks", "no AA (game image)", "game AA", "motion view"]
+IMAGES = 4  # the motion view is not an image of the scene
 
 
 def load(path):
@@ -43,9 +44,12 @@ def main():
         m = re.search(r"Saved screenshot: (.*\.png)", line)
         if m and started:
             saved.append(Path(m[1]))
-    assert len(shots) == 32 and len(saved) >= 32, (len(shots), len(saved))
-    frames = {mode: [] for mode in range(4)}
-    for (mode, _), path in zip(shots, saved[:32]):
+    n = 8 * len(MODES)
+    assert len(shots) == n and len(saved) >= n, (len(shots), len(saved))
+    frames = {mode: [] for mode in range(IMAGES)}
+    for (mode, _), path in zip(shots, saved[:n]):
+        if mode >= IMAGES:
+            continue
         frames[mode].append(load(path))
 
     lumas = {m: np.stack([f[1] for f in frames[m]]) for m in frames}
@@ -53,7 +57,7 @@ def main():
         same = sum(np.array_equal(lumas[m][i], lumas[m][i + 1]) for i in range(7))
         if same:
             print(f"warning: mode {m} has {same} identical neighbour frames")
-    # Edges from the no-jitter FSR mean; "still" = pixels that barely change in that mode.
+    # Edges from the mean of the unjittered game image; "still" = pixels that barely change in that mode.
     ref = lumas[2].mean(0)
     edge = gradient(ref) > 0.08
     still = lumas[2].std(0) < 0.01
@@ -74,11 +78,11 @@ def main():
     picks = sorted(density, reverse=True)[:4]
     rows = []
     for _, x, y in picks:
-        rows.append(np.concatenate([frames[m][0][0][y:y + ch, x:x + cw] for m in range(4)], 1))
+        rows.append(np.concatenate([frames[m][0][0][y:y + ch, x:x + cw] for m in range(IMAGES)], 1))
     sheet = (np.concatenate(rows, 0) * 255).astype(np.uint8)
     Image.fromarray(sheet).resize((sheet.shape[1] * 3, sheet.shape[0] * 3), Image.NEAREST).save(
         out / "crops.png")
-    print("crops (x, y):", [(x, y) for _, x, y in picks], "columns:", MODES)
+    print("crops (x, y):", [(x, y) for _, x, y in picks], "columns:", MODES[:IMAGES])
 
 
 if __name__ == "__main__":

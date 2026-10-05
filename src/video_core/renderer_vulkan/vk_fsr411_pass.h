@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <array>
 #include <deque>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "common/types.h"
@@ -33,13 +35,34 @@ public:
     /// Builds the passes and runs one frame on scratch images, then waits for the GPU.
     bool SelfTest(u32 width, u32 height);
 
+    /// What RecordAa writes to the output: FSR's result, or for a test the game's image as it
+    /// is or the characters' vectors over it (fsr411_motion_view.comp; needs `object_motion`).
+    enum class AaView { Fsr, Input, Motion };
+
     /// In place of the game's AA: FSR at the size of frame.color into an RGBA16F image, then a
     /// store pass writes it sRGB-encoded, with the alpha of frame.color, into `output` (a
-    /// storage view in General). Sets frame.output; a size change sets frame.reset.
-    bool RecordAa(Fsr411::Frame& frame, vk::ImageView output);
+    /// storage view in General). Sets frame.output; a size change sets frame.reset. With
+    /// `object_motion` (ObjectMotion's image, General, read barrier recorded), a merge pass first
+    /// lays its vectors over frame.motion and, with `mark_uncovered`, takes the history from the
+    /// background the characters uncover (fsr411_motion.comp); FSR reads the result. FSR's first
+    /// frame after a test view resets its history.
+    bool RecordAa(Fsr411::Frame& frame, vk::ImageView output, vk::ImageView object_motion = {},
+                  AaView view = AaView::Fsr, bool mark_uncovered = true);
 
 private:
-    void CreateStorePass();
+    /// A compute pass with push descriptors: `samplers` combined image samplers (nearest),
+    /// then `storages` storage images, and with `push` one u32 push constant; one dispatch per
+    /// 8x8 pixels.
+    struct Pass {
+        vk::UniqueDescriptorSetLayout set_layout;
+        vk::UniquePipelineLayout layout;
+        vk::UniquePipeline pipeline;
+        bool push{};
+    };
+    Pass CreatePass(std::span<const u32> code, u32 samplers, u32 storages, bool push = false);
+    void Dispatch(vk::CommandBuffer cmdbuf, const Pass& pass,
+                  std::span<const vk::DescriptorImageInfo> images, u32 samplers, u32 width,
+                  u32 height, u32 push = 0);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -51,10 +74,28 @@ private:
 
     VideoCore::UniqueImage upscaled;
     vk::UniqueImageView upscaled_view;
-    vk::UniqueSampler store_sampler;
-    vk::UniqueDescriptorSetLayout store_set_layout;
-    vk::UniquePipelineLayout store_layout;
-    vk::UniquePipeline store_pipeline;
+    VideoCore::UniqueImage merged; ///< the motion FSR reads with object motion (RG16F)
+    vk::UniqueImageView merged_view;
+    /// The characters' pixels, grown by 1, of the last merge and of this one (R8).
+    std::array<VideoCore::UniqueImage, 2> cover;
+    std::array<vk::UniqueImageView, 2> cover_views;
+    u32 cover_index{};
+    vk::UniqueSampler sampler;
+    Pass store;
+    Pass merge;
+    Pass motion_view;
+    bool skipped{}; ///< the last frame showed a test view, so FSR's history is stale
+
+    /// BB_FSR4_PROFILE=1 (as the runtime's per-pass times): GPU time of the merge pass, with and
+    /// without the marks, read when a slot comes round again, logged every 300 merges.
+    void CollectMergeTime();
+    static constexpr u32 MergeSlots = 8;
+    vk::UniqueQueryPool merge_queries;
+    std::array<s8, MergeSlots> merge_marks{}; ///< per slot: -1 empty, else the marks flag
+    u32 merge_slot{};
+    std::array<double, 2> merge_ms{};
+    std::array<u32, 2> merge_frames{};
+    float timestamp_ns{};
 };
 
 } // namespace Vulkan

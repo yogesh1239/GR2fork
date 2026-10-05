@@ -661,6 +661,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             !instance.IsDepthClipControlSupported() &&
             regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
         info.hw.vs.clip_disable = regs.IsClipDisabled();
+        info.hw.vs.motion_vectors = motion_sel_;
         break;
     }
     case HwStage::Fragment: {
@@ -675,6 +676,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
                 ? regs.aa_config.NumSamples()
                 : 1;
         info.hw.fs.z_export_format = regs.z_export_format;
+        info.hw.fs.motion_vectors = motion_sel_;
         u8 stencil_ref_export_enable = regs.depth_shader_control.stencil_op_val_export_enable |
                                        regs.depth_shader_control.stencil_test_val_export_enable;
         info.hw.fs.mrtz_mask = regs.depth_shader_control.z_export_enable |
@@ -824,6 +826,7 @@ SHAD_NO_INLINE u32 PipelineCache::SnapshotRuntimeInputs(HwStage stage, u32* __re
         put(regs.primitive_type);
         put(regs.tess_config);
         put(indirect_key_);
+        put(u32{motion_sel_});
         break;
     case HwStage::Fragment: {
         put(regs.ps_program.settings);
@@ -840,6 +843,7 @@ SHAD_NO_INLINE u32 PipelineCache::SnapshotRuntimeInputs(HwStage stage, u32* __re
         put(regs.stage_enable);
         put(regs.vs_output_control);
         put(graphics_key.color_buffers);
+        put(u32{motion_sel_});
         const u32 count = std::min<u32>(num_interp, static_cast<u32>(regs.ps_inputs.size()));
         put_words(regs.ps_inputs.data(), count);
         break;
@@ -1595,11 +1599,43 @@ Shader::ShaderParams PipelineCache::ResolveParams(SwStage l_stage, const Pgm& pg
     return {.user_data = pgm.user_data, .code = std::span{code, id.len_dw}, .hash = id.hash};
 }
 
+// FSR 4.1.1 object motion: GR2's forward-shaded characters (Kat, the people) write no velocity.
+// They draw into one RGBA16F target with a depth test, from a vertex shader alone. (Their ink
+// outline goes through a geometry shader, which the motion code does not follow.)
+// Only registers decide here, before the stages resolve: the runtime infos read the result.
+static bool MotionDraw(const AmdGpu::Regs& regs) {
+    using namespace AmdGpu;
+    using LiverpoolToVK::IsDualSourceBlendFactor;
+    const auto& cb0 = regs.color_buffers[0];
+    const auto& cb7 = regs.color_buffers[Shader::MotionVectors::Output];
+    const auto& blend = regs.blend_control[0];
+    // Dual-source blending allows one colour attachment only.
+    const bool dual_source =
+        blend.enable && !cb0.info.blend_bypass &&
+        (IsDualSourceBlendFactor(blend.color_src_factor) ||
+         IsDualSourceBlendFactor(blend.color_dst_factor) ||
+         (blend.separate_alpha_blend && (IsDualSourceBlendFactor(blend.alpha_src_factor) ||
+                                         IsDualSourceBlendFactor(blend.alpha_dst_factor))));
+    return cb0 && regs.color_target_mask.GetMask(0) && (regs.color_shader_mask.raw & ~0xfu) == 0 &&
+           cb0.GetDataFmt() == DataFormat::Format16_16_16_16 &&
+           cb0.GetNumberFmt() == NumberFormat::Float && cb0.NumSamples() == 1 && !dual_source &&
+           !(cb7 && regs.color_target_mask.GetMask(Shader::MotionVectors::Output)) &&
+           regs.color_control.mode != ColorControl::OperationMode::Disable &&
+           regs.color_control.rop3 == ColorControl::LogicOp::Copy &&
+           regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
+           regs.depth_buffer.NumSamples() == 1 &&
+           regs.stage_enable.raw == static_cast<u32>(ShaderStageEnable::VgtStages::Vs) &&
+           !regs.IsClipDisabled() &&
+           (regs.primitive_type == PrimitiveType::TriangleList ||
+            regs.primitive_type == PrimitiveType::TriangleStrip);
+}
+
 bool PipelineCache::RefreshGraphicsStages(bool track_hash_diff) {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
     fetch_shader_ref = {};
     stage_hash_diff = 0;
+    motion_sel_ = object_motion_ && MotionDraw(regs);
 
     // An armed resolve accumulates old ^ new per stage hash it writes, so the
     // reuse decision never reloads the array right after these stores.
@@ -1655,6 +1691,17 @@ bool PipelineCache::RefreshGraphicsStages(bool track_hash_diff) {
 
     const auto* fs_info = infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
+    // The motion attachment is not in key.color_buffers: the fragment runtime info reads those.
+    // The flag is written either way, as the reuse path starts from the last key; a change of it
+    // changes mrt_mask, which sends that path to the full refresh.
+    constexpr u32 motion_slot = Shader::MotionVectors::Output;
+    key.motion_vectors = motion_sel_ && key.mrt_mask == 1;
+    if (key.motion_vectors) {
+        key.mrt_mask |= 1u << motion_slot;
+        key.write_masks[motion_slot] =
+            vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+            vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+    }
     // Shader::Info::mrt_mask is u8, which is the only thing bounding this to
     // NUM_COLOR_BUFFERS; the second color loop indexes both regs.color_buffers and
     // key.color_buffers with it.

@@ -252,6 +252,10 @@ GraphicsPipeline::GraphicsPipeline(
         }
         color_formats[i] = color_format;
     }
+    constexpr u32 MotionSlot = Shader::MotionVectors::Output;
+    if (key.motion_vectors) {
+        color_formats[MotionSlot] = vk::Format::eR32G32B32A32Sfloat;
+    }
 
     std::array<vk::SampleCountFlagBits, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
     std::ranges::transform(key.color_samples, color_samples.begin(), [&instance](u8 num_samples) {
@@ -376,6 +380,22 @@ GraphicsPipeline::GraphicsPipeline(
                                                      ? vk::BlendFactor::eOne
                                                      : vk::BlendFactor::eZero; // 1-A
         }
+    }
+
+    // After the loop: its masked-out-alpha fixup would turn this blend into a plain write. The
+    // fragment's alpha is its validity, so an invalid fragment leaves the attachment as it is.
+    if (key.motion_vectors) {
+        attachments[MotionSlot] = vk::PipelineColorBlendAttachmentState{
+            .blendEnable = true,
+            .srcColorBlendFactor = vk::BlendFactor::eSrcAlpha,
+            .dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha,
+            .colorBlendOp = vk::BlendOp::eAdd,
+            .srcAlphaBlendFactor = vk::BlendFactor::eSrcAlpha,
+            .dstAlphaBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha,
+            .alphaBlendOp = vk::BlendOp::eAdd,
+            .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
+        };
     }
 
     const vk::PipelineColorBlendStateCreateInfo color_blending = {

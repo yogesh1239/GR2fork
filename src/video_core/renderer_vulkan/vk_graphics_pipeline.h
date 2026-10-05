@@ -47,6 +47,7 @@ struct GraphicsPipelineKey {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;
         u32 depth_clamp_enable : 1;
+        u32 motion_vectors : 1; ///< FSR 4.1.1 object motion: attachment 7 (MotionVectors)
     };
     struct {
         AmdGpu::PrimitiveType prim_type : 5;

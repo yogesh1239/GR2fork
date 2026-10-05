@@ -10,6 +10,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_fsr411_pass.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/skipcache/skipcache.h"
@@ -464,9 +465,16 @@ private:
     u32 fsr411_depth_draws{};
     u32 draw_jitter_key_{};   ///< fsr411_jitter_index when this draw is jittered, else 0
     u32 fsr411_test_frame_{}; ///< AA passes into the test sequence; 0 when it is not running
-    u32 fsr411_test_mode_{};  ///< 0 normal, 1 FSR sign reversed, 2 no jitter, 3 the game's AA
+    /// 0 normal, 1 no marks of uncovered background, 2 no AA and no jitter, 3 the game's AA,
+    /// 4 motion view
+    u32 fsr411_test_mode_{};
     u32 fsr411_resets{};
     bool fsr411_shape_warned{};
+    // FSR 4.1.1 object motion: the draw's history slots into push_data (vk_object_motion.h).
+    void PrepareMotion(const GraphicsPipeline* pipeline, const RenderState& state, bool is_indexed,
+                       u32 index_offset);
+    ObjectMotion object_motion;
+    u64 motion_geometry_{}; ///< hash of the draw's vertex buffer descriptors
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
