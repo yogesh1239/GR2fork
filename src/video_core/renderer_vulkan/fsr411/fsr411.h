@@ -17,7 +17,7 @@
 #include <memory>
 #include <string>
 
-#include <vulkan/vulkan.h>
+#include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Fsr411 {
 
