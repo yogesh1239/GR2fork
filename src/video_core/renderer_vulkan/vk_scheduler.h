@@ -650,11 +650,14 @@ public:
     /// been recorded. Without deferral, returns `data` itself.
     template <typename T>
     std::span<const T> RecordData(std::span<const T> data) {
+        // Chunk offsets stay 8-aligned, so no padding is needed and a caller's
+        // ReserveRecordData() of the plain byte sum keeps every span of one command in one chunk.
+        static_assert(sizeof(T) % 8 == 0 && alignof(T) <= 8);
         if (!IsRecordingDeferred() || data.empty()) {
             return data;
         }
         const size_t bytes = data.size_bytes();
-        ReserveRecordData(bytes + alignof(T));
+        ReserveRecordData(bytes);
         auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
         std::memcpy(dst, data.data(), bytes);
         return {dst, data.size()};

@@ -769,18 +769,25 @@ void Runtime::FlushBarriers() {
     }
 
     scheduler.EndRendering();
-    scheduler.ReserveRecordData(image_barriers.size() * sizeof(vk::ImageMemoryBarrier2));
-    const auto images = scheduler.RecordData(
-        std::span<const vk::ImageMemoryBarrier2>{image_barriers.data(), image_barriers.size()});
-    scheduler.Record([memory = memory_barrier, memory_count = dep_info.memoryBarrierCount,
-                      images](vk::CommandBuffer cmdbuf) {
-        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-            .memoryBarrierCount = memory_count,
-            .pMemoryBarriers = &memory,
-            .imageMemoryBarrierCount = static_cast<u32>(images.size()),
-            .pImageMemoryBarriers = images.data(),
+    const size_t image_bytes = image_barriers.size() * sizeof(vk::ImageMemoryBarrier2);
+    if (image_bytes > RecordChunk::Capacity / 2) {
+        // Too large for a recording chunk (one barrier per mip and layer of a big image):
+        // CommandBuffer() waits for the recorder, so this stays in order.
+        scheduler.CommandBuffer().pipelineBarrier2(dep_info);
+    } else {
+        scheduler.ReserveRecordData(image_bytes);
+        const auto images = scheduler.RecordData(
+            std::span<const vk::ImageMemoryBarrier2>{image_barriers.data(), image_barriers.size()});
+        scheduler.Record([memory = memory_barrier, memory_count = dep_info.memoryBarrierCount,
+                          images](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = memory_count,
+                .pMemoryBarriers = &memory,
+                .imageMemoryBarrierCount = static_cast<u32>(images.size()),
+                .pImageMemoryBarriers = images.data(),
+            });
         });
-    });
+    }
 
     memory_barrier.srcStageMask = vk::PipelineStageFlagBits2::eNone;
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
