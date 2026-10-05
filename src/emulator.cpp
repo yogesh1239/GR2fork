@@ -64,6 +64,10 @@ namespace Libraries::Kernel {
 extern char const* g_environment[64];
 }
 
+#ifdef SHADPS4_PGO_GEN
+extern "C" int __llvm_profile_write_file(void);
+#endif
+
 namespace Core {
 
 std::mutex exit_mutex{};
@@ -80,6 +84,11 @@ Emulator::Emulator() {
     WSAStartup(versionWanted, &wsaData);
 #endif
     std::at_quick_exit([]() { Common::Singleton<Core::Emulator>::Instance()->Shutdown(); });
+#ifdef SHADPS4_PGO_GEN
+    // PGO training builds only: the emulator ends with quick_exit, which skips the atexit handler
+    // that writes the profile. Registered last, so it runs first, before Shutdown.
+    std::at_quick_exit([] { __llvm_profile_write_file(); });
+#endif
 }
 
 Emulator::~Emulator() {}
