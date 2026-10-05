@@ -2,6 +2,10 @@
 SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
+**FSR 4.1.1 for Gravity Rush 2** (AMD Radeon RX 9000 cards): this fork can replace the game's anti-aliasing with AMD FSR 4.1.1. AMD's model files are not included. Guide: [documents/gr2-fsr411/README.md](documents/gr2-fsr411/README.md)
+
+-------
+
 **Set up GR2fork with the Following Playlist:**
 https://www.youtube.com/watch?v=O8z6QPOaGDg&list=PLOgHncbXc__M&pp=sAgC
 

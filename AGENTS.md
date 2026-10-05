@@ -23,12 +23,13 @@ Add a file named `i-didnt-check-my-work.md` to the root of the repository with t
 - Prefer reusing existing abstractions in the codebase over introducing new ones.
 - Make sure the project builds before proposing changes.
 
-## Local branch `fsr411`: FSR 4.1.1 for Gravity Rush 2
+## FSR 4.1.1 for Gravity Rush 2
 
-This branch is local work on top of `GR2fork-EXODUS`. It is not meant for upstream: an upscaler fed by
-one game's motion vectors is game-specific by design, which the code rules above forbid upstream.
+FSR 4.1.1 replaces Gravity Rush 2's anti-aliasing. It is not meant for upstream shadPS4: an upscaler fed
+by one game's motion vectors is game-specific by design, which the code rules above forbid upstream.
 
-- Plan, findings and status: `documents/gr2-fsr411/PLAN.md`. Read it before working on this branch.
+- Player guide: `documents/gr2-fsr411/README.md`. Plan, findings and status: `PLAN.md` and
+  `HANDOFF.md` in the same folder. Read them before changing the FSR code.
 - Test only from `/home/yogesh/Games/GR2fork-FSR4-test` (start with `start-gr2-test.sh`, kept in sync
   with `documents/gr2-fsr411/start-gr2-test.sh`). It holds a copy of the user's `user/` folder. The
   emulator uses `./user` from the working directory and otherwise falls back to the shared
@@ -36,4 +37,3 @@ one game's motion vectors is game-specific by design, which the code rules above
 - Never write to `/home/yogesh/Games/GR2fork-linux64-2026-07-27-d7bef71` (the user's live install).
 - Never commit AMD's FSR 4.1.1 model files (`fsr4_411*`), PS4 system modules, saves or game files.
 - The user is not a programmer: explain in plain language (see `~/.claude/CLAUDE.md`).
-- To follow `GR2fork-EXODUS`, rebase this branch; do not merge.

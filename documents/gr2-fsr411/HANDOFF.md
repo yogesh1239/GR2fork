@@ -1,6 +1,8 @@
-# Handoff: GR2 FSR 4.1.1, Phase 3 done, Phase 3b built (not tested)
+# Handoff: GR2 FSR 4.1.1, Phase 3 and Phase 3b done (committed, tested)
 
-Updated 2026-10-05 (fourth session: Phase 3b object motion built, uncommitted, waiting for the user's test). Read `PLAN.md` first. This file holds only the state of the work in progress.
+Updated 2026-10-05 (fifth session: Phase 3b and the Codex review fixes committed as cc8ff050 and c98f0903; the user tested them in play: fine). Next: Phase 5 (Phase 4 dropped by the user); see "Next steps". Read `PLAN.md` first. This file holds only the state of the work in progress.
+
+Ported onto `yogesh1239/GR2fork` main (recording thread, newer EXODUS) on 2026-10-05: 3 merge conflicts joined by hand, then one port commit (56 buffer offsets in the SPIR-V push block, `ImageBinding::image_id`, shader cache versions bumped). The FSR passes record through `Scheduler::CommandBuffer()`, which syncs the recording thread once per FSR frame. Player guide: `README.md`.
 
 ## State
 
@@ -88,7 +90,7 @@ Design (bbport `ObjectMotion`, changed where noted):
 - Selection, registers only (`MotionDraw` in `vk_pipeline_cache.cpp`, before the stages resolve, so the runtime infos can read it): cb0 RGBA16F float, 1 sample, no blend; CB_SHADER_MASK only MRT0; cb7 unbound; colour mode not Disable; logic op Copy; depth test and write on, 1 sample; VS-only; clipping on; triangle list/strip. Then the FS must export only MRT0. *bbport selected by bone-palette buffer sizes.*
 - `HwVertexRuntimeInfo`/`HwFragmentRuntimeInfo::motion_vectors` sit in padding (sizes unchanged: 24/216/280 bytes), so the persisted shader cache stays valid. `motion_sel_` is also in `SnapshotRuntimeInputs` (Fragment uses 63 of 96 words).
 - Key: bit `motion_vectors`, `mrt_mask |= 0x80`, `write_masks[7]` = RGBA. Attachment 7 is **not** in `key.color_buffers` (the FS runtime info reads those). The pipeline sets slot 7 to RGBA32F with blend src·α + dst·(1−α) **after** the blend loop (its masked-out-alpha fixup would turn it into a plain write).
-- Per-draw parameters in **push constants** (`PushData::motion`, 6 u32 at offset 56, and `motion_positions` u64 at 80; `sizeof` 56 → 88). *bbport used a host-visible parameter ring with GPU waits; GR2's push block had room.* `Rasterizer::BindResources` zeroes them for every draw and dispatch; only `Draw` → `PrepareMotion` fills them.
+- Per-draw parameters in **push constants** (`PushData::motion`, 6 u32 at offset 56, and `motion_positions` u64 at 80; `sizeof` 56 → 88; after the port onto main, with 56 buffer offsets: 72 and 96, `sizeof` 104). *bbport used a host-visible parameter ring with GPU waits; GR2's push block had room.* `Rasterizer::BindResources` zeroes them for every draw and dispatch; only `Draw` → `PrepareMotion` fills them.
 - VS (`EmitVertexMotion`): atomic per-component store of the clip position at `positions + (store + slot)·16`, load of last frame's at `load`, varyings at locations 30/31 (`z` of the previous one = valid). FS (`EmitFragmentMotion`): writes `(prev NDC − cur NDC, FragCoord.z, valid)`; **NDC units, the same as GR2's velocity image** (*bbport: pixels via the viewport scale*); valid is quantised (an interpolated flag would blend half vectors).
 - **Blending keyed on valid** (*bbport overwrote*): an untracked draw (first frame of a mesh, over capacity, off the scene) leaves earlier vectors alone; GR2 draws some meshes twice at the same depth (LessEqual), and an overwrite would erase a good vector.
 - Attachment: `BeginRendering` attaches the image only when the draw is on the scene depth (`fsr411_depth`), single-layer and inside the image; otherwise slot 7 stays null, which `VK_EXT_dynamic_rendering_unused_attachments` (now enabled when present) allows. *bbport always attached.*
@@ -140,6 +142,8 @@ Codex reviewed `4ee4e92d`..working tree (`REVIEW_PROMPT.md`), then debated the f
 - Process: commit Phase 3b and the fixes separately; run sync validation on base and branch; transition tests (off at start then on, on-off-on, refused dispatch, resize, every Home-mode boundary, warm and cold shader cache); a paired A/B test mode (two `Fsr411::Upscaler` instances, two histories, identical inputs, object history, cover and jitter advanced once per frame, both full outputs captured) before any offline replay tool.
 
 ## Next steps, in order
+
+Current (2026-10-05, after c98f0903): Phase 3b is done. Phase 4 is dropped (user: the emulator, not the PC, is the bottleneck). Left: Phase 5 (AppImage without the model files plus a short guide, about 1 h; per-game settings and timing already exist, and a failed FSR dispatch already falls back to the game's AA). Optional checks, only on the user's go: single-frame diagnostic view, paired A/B mode, sync validation, the game's own speckle below the heel, the reset counter, a colour comparison on the same frame. Camera cuts: low priority. The list below is the history.
 
 1. Done 2026-10-05: jitter run, log check (J > 0, F = 1), still and moving tests above. Still open from it: the reset counter re-check (7 resets in about 48 min of play, one after only 6 flips; no reset during continuous play seen) and a colour/brightness comparison on the same frame.
 2. **Phase 3b next (recommended to the user 2026-10-05, waiting for the user's go).** Character motion vectors, required by the user. It is the only known flaw left in Phase 3. The tests so far showed no trails, but no passers-by walked across the screen, and at about 140 FPS a limb moves only a few pixels per frame.

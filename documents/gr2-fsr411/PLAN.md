@@ -277,6 +277,8 @@ Your Bloodborne port already does the same thing for Bloodborne's characters. I 
 
 ### Phase 4: Job B, real upscaling
 
+**Dropped (user, 2026-10-05):** the emulator, not the PC, limits the frame rate, so a smaller game picture gives no speed. Kept here only for reference.
+
 **What I do:**
 
 1. I make the game draw at a smaller size with the existing resolution patch. For example, the 1080p patch for "Quality" at 1440p output. Other sizes need new numbers in the patch.
