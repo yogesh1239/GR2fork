@@ -459,7 +459,7 @@ private:
     Fsr411Pass fsr411_pass;
     u32 fsr411_flips{}; ///< guest flips since the last FSR frame
     u32 fsr411_runs{};
-    bool fsr411_continuous{}; ///< the last AA dispatch ran FSR
+    bool fsr411_continuous{};          ///< the last AA dispatch ran FSR
     VideoCore::ImageId fsr411_depth{}; ///< scene depth of the last FSR frame; null: no jitter
     u32 fsr411_jitter_index{1};        ///< Halton index of the next scene's jitter
     u32 fsr411_jittered_draws{};

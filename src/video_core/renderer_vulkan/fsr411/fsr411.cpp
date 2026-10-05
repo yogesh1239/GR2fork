@@ -22,11 +22,11 @@ namespace Fsr411 {
 namespace {
 
 constexpr const char* kPasses[] = {
-    "spd",         "prepass",     "pass0_post",  "pass1",       "pass1_post",  "pass2",
-    "pass2_post",  "pass3",       "pass3_post",  "pass4",       "pass4_post",  "pass5",
-    "pass5_post",  "pass6",       "pass6_post",  "pass7",       "pass7_post",  "pass8",
-    "pass8_post",  "pass9",       "pass9_post",  "pass10",      "pass10_post", "pass11",
-    "pass11_post", "pass12",      "pass12_post", "postpass",    "rcas",
+    "spd",         "prepass", "pass0_post",  "pass1",    "pass1_post",  "pass2",
+    "pass2_post",  "pass3",   "pass3_post",  "pass4",    "pass4_post",  "pass5",
+    "pass5_post",  "pass6",   "pass6_post",  "pass7",    "pass7_post",  "pass8",
+    "pass8_post",  "pass9",   "pass9_post",  "pass10",   "pass10_post", "pass11",
+    "pass11_post", "pass12",  "pass12_post", "postpass", "rcas",
 };
 constexpr uint32_t kPassCount = sizeof(kPasses) / sizeof(kPasses[0]);
 /// Tensor level (1/2^level of the aligned output) a model pass runs at, and of its _post pass.
@@ -180,9 +180,11 @@ bool Reflect(const std::vector<uint32_t>& words, Reflection& out, std::string& e
         } else if (pointee.op == 25) {
             const bool buffer = pointee.b == 5;
             if (pointee.c == 2) {
-                type = buffer ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                type = buffer ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER
+                              : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             } else {
-                type = buffer ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                type = buffer ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER
+                              : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
             }
         } else {
             continue;
@@ -234,7 +236,8 @@ struct Upscaler::Impl {
         VkImageView view = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
     };
-    Img recurrent, history, reprojected, mlsr_output, exposure, exposure_identity, spd_atomic, spd_mip5;
+    Img recurrent, history, reprojected, mlsr_output, exposure, exposure_identity, spd_atomic,
+        spd_mip5;
     struct Buf {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -249,7 +252,8 @@ struct Upscaler::Impl {
     std::map<std::string, std::array<uint32_t, 2>> pass_dispatch;
     uint64_t frame_index = 0;
     float previous_pre_exposure = 0.0f;
-    // BB_FSR4_PROFILE=1: GPU time per pass, read when a ring slot is reused, printed every 300 frames.
+    // BB_FSR4_PROFILE=1: GPU time per pass, read when a ring slot is reused, printed every 300
+    // frames.
     VkQueryPool profile_pool = VK_NULL_HANDLE;
     float period_ns = 1.0f;
     std::array<uint32_t, kFramesInFlight> profile_count{};
@@ -295,7 +299,8 @@ struct Upscaler::Impl {
             return;
         }
         double total = 0.0;
-        for (double ms : profile_ms) total += ms;
+        for (double ms : profile_ms)
+            total += ms;
         std::printf("FSR 4.1.1 profile: %.3f ms/frame\n", total / 300.0);
         for (uint32_t p = 0; p < kPassCount; ++p) {
             if (profile_ms[p] > 0.0) {
@@ -308,7 +313,8 @@ struct Upscaler::Impl {
 
     ~Impl() {
         Destroy();
-        if (profile_pool) vkDestroyQueryPool(device, profile_pool, nullptr);
+        if (profile_pool)
+            vkDestroyQueryPool(device, profile_pool, nullptr);
     }
 
     uint32_t MemoryType(uint32_t bits, VkMemoryPropertyFlags flags) const {
@@ -394,26 +400,35 @@ struct Upscaler::Impl {
     }
 
     void FreeImage(Img& img) {
-        if (img.view) vkDestroyImageView(device, img.view, nullptr);
-        if (img.image) vkDestroyImage(device, img.image, nullptr);
-        if (img.memory) vkFreeMemory(device, img.memory, nullptr);
+        if (img.view)
+            vkDestroyImageView(device, img.view, nullptr);
+        if (img.image)
+            vkDestroyImage(device, img.image, nullptr);
+        if (img.memory)
+            vkFreeMemory(device, img.memory, nullptr);
         img = {};
     }
 
     void FreeBuffer(Buf& b) {
-        if (b.buffer) vkDestroyBuffer(device, b.buffer, nullptr);
-        if (b.memory) vkFreeMemory(device, b.memory, nullptr);
+        if (b.buffer)
+            vkDestroyBuffer(device, b.buffer, nullptr);
+        if (b.memory)
+            vkFreeMemory(device, b.memory, nullptr);
         b = {};
     }
 
     void Destroy() {
         for (Pass& p : passes) {
-            if (p.pipeline) vkDestroyPipeline(device, p.pipeline, nullptr);
-            if (p.layout) vkDestroyPipelineLayout(device, p.layout, nullptr);
-            if (p.set_layout) vkDestroyDescriptorSetLayout(device, p.set_layout, nullptr);
+            if (p.pipeline)
+                vkDestroyPipeline(device, p.pipeline, nullptr);
+            if (p.layout)
+                vkDestroyPipelineLayout(device, p.layout, nullptr);
+            if (p.set_layout)
+                vkDestroyDescriptorSetLayout(device, p.set_layout, nullptr);
             p = {};
         }
-        if (linear_clamp) vkDestroySampler(device, linear_clamp, nullptr);
+        if (linear_clamp)
+            vkDestroySampler(device, linear_clamp, nullptr);
         profile_count = {};
         linear_clamp = VK_NULL_HANDLE;
         for (Img* img : {&recurrent, &history, &reprojected, &mlsr_output, &exposure,
@@ -472,15 +487,18 @@ struct Upscaler::Impl {
         std::vector<VkExtensionProperties> exts(count);
         vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, exts.data());
         const auto has = [&](const char* name) {
-            return std::any_of(exts.begin(), exts.end(),
-                               [&](const VkExtensionProperties& e) { return !std::strcmp(e.extensionName, name); });
+            return std::any_of(exts.begin(), exts.end(), [&](const VkExtensionProperties& e) {
+                return !std::strcmp(e.extensionName, name);
+            });
         };
-        if (!has(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) || !has(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)) {
+        if (!has(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) ||
+            !has(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)) {
             return false;
         }
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
-        VkPhysicalDeviceShaderFloat8FeaturesEXT f8{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
+        VkPhysicalDeviceShaderFloat8FeaturesEXT f8{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT};
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
         VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -497,7 +515,8 @@ struct Upscaler::Impl {
         std::vector<uint8_t> bytes;
         const std::string path = dir + "/" + set + "/" + kPasses[index] + ".spv";
         if (!ReadFile(path, bytes) || bytes.size() % 4) {
-            error = "missing " + path + " (tools/fsr4cap: capture and extract the FSR 4.1.1 assets)";
+            error =
+                "missing " + path + " (tools/fsr4cap: capture and extract the FSR 4.1.1 assets)";
             return false;
         }
         std::vector<uint32_t> words(bytes.size() / 4);
@@ -552,7 +571,8 @@ struct Upscaler::Impl {
                 pci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
             }
         }
-        const VkResult r = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
+        const VkResult r =
+            vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
         vkDestroyShaderModule(device, module, nullptr);
         if (r != VK_SUCCESS) {
             error = path + ": pipeline creation failed (" + std::to_string(int(r)) + ")";
@@ -583,7 +603,8 @@ struct Upscaler::Impl {
             return false;
         }
         if (fp8 && !Fp8DeviceSupported()) {
-            error = "FSR 4.1.1 FP8 assets need VK_KHR_cooperative_matrix and VK_EXT_shader_float8 (RDNA4)";
+            error = "FSR 4.1.1 FP8 assets need VK_KHR_cooperative_matrix and VK_EXT_shader_float8 "
+                    "(RDNA4)";
             return false;
         }
         for (uint32_t i = 0; i < kPassCount; ++i) {
@@ -596,8 +617,9 @@ struct Upscaler::Impl {
             error = "missing or wrong " + dir + "/" + set + "/initializer.bin";
             return false;
         }
-        const VkDeviceSize scratch_size =
-            scratch_override ? scratch_override : tier2160 ? 83232256u : 20880256u;
+        const VkDeviceSize scratch_size = scratch_override ? scratch_override
+                                          : tier2160       ? 83232256u
+                                                           : 20880256u;
         if (!MakeImage(recurrent, VK_FORMAT_R8G8B8A8_UNORM, ow, oh) ||
             !MakeImage(history, VK_FORMAT_R16G16B16A16_SFLOAT, ow, oh) ||
             !MakeImage(reprojected, VK_FORMAT_R16G16B16A16_SFLOAT, ow, oh) ||
@@ -607,11 +629,14 @@ struct Upscaler::Impl {
             !MakeImage(spd_atomic, VK_FORMAT_R32_UINT, 1, 1) ||
             !MakeImage(spd_mip5, VK_FORMAT_R32_SFLOAT, CeilDiv(ow, 16), CeilDiv(oh, 16)) ||
             !MakeBuffer(scratch, scratch_size,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false) ||
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        false) ||
             !MakeBuffer(initializer, 131072,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false) ||
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        false) ||
             !MakeBuffer(staging, 131072, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true) ||
-            !MakeBuffer(ubo, kFramesInFlight * 4 * ubo_align, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true) ||
+            !MakeBuffer(ubo, kFramesInFlight * 4 * ubo_align, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                        true) ||
             !MakeBuffer(tensor_ubo, 512, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true)) {
             return false;
         }
@@ -645,21 +670,25 @@ struct Upscaler::Impl {
             to_general.push_back(b);
         }
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, uint32_t(to_general.size()), to_general.data());
+                             0, 0, nullptr, 0, nullptr, uint32_t(to_general.size()),
+                             to_general.data());
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const VkClearColorValue zero{}, one{{1.0f, 1.0f, 1.0f, 1.0f}};
-        for (Img* img : {&recurrent, &history, &reprojected, &mlsr_output, &exposure, &spd_atomic, &spd_mip5}) {
+        for (Img* img : {&recurrent, &history, &reprojected, &mlsr_output, &exposure, &spd_atomic,
+                         &spd_mip5}) {
             vkCmdClearColorImage(cmd, img->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
         }
-        vkCmdClearColorImage(cmd, exposure_identity.image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
+        vkCmdClearColorImage(cmd, exposure_identity.image, VK_IMAGE_LAYOUT_GENERAL, &one, 1,
+                             &range);
         vkCmdFillBuffer(cmd, scratch.buffer, 0, VK_WHOLE_SIZE, 0);
         const VkBufferCopy copy{0, 0, 131072};
         vkCmdCopyBuffer(cmd, staging.buffer, initializer.buffer, 1, &copy);
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0,
+                             nullptr);
         uploaded = true;
     }
 
@@ -673,8 +702,8 @@ struct Upscaler::Impl {
             return false;
         }
         const bool tier2160 = ow > 1920 || oh > 1080;
-        const std::string wanted = std::string(tier2160 ? "t2160" : "t1080") +
-                                   (f.ultra_performance ? "_m1" : "_m0");
+        const std::string wanted =
+            std::string(tier2160 ? "t2160" : "t1080") + (f.ultra_performance ? "_m1" : "_m0");
         if (!ready || wanted != set || ow != out_w || oh != out_h) {
             if (!Create(wanted, ow, oh, tier2160)) {
                 Destroy();
@@ -696,7 +725,8 @@ struct Upscaler::Impl {
         uint32_t profiled = 0;
         if (profile_pool) {
             vkCmdResetQueryPool(cmd, profile_pool, query_base, kPassCount + 1);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, profile_pool, query_base);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, profile_pool,
+                                query_base);
         }
         auto* base = static_cast<uint8_t*>(ubo.mapped) + slot;
         struct Mlsr {
@@ -778,7 +808,8 @@ struct Upscaler::Impl {
                 w.dstBinding = b.binding;
                 w.descriptorCount = 1;
                 w.descriptorType = b.type;
-                const auto image = [&](VkImageView view, VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) {
+                const auto image = [&](VkImageView view,
+                                       VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) {
                     images.push_back({VK_NULL_HANDLE, view, layout});
                     w.pImageInfo = &images.back();
                 };
@@ -789,28 +820,48 @@ struct Upscaler::Impl {
                 const std::string& n = b.name;
                 if (b.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
                     continue; // immutable
-                } else if (n == "r_input_color") image(f.color.view, f.color.layout);
-                else if (n == "r_velocity") image(f.motion.view, f.motion.layout);
-                else if (n == "r_depth") image(f.depth.view, f.depth.layout);
-                else if (n == "r_history_color" || n == "rw_history_color") image(history.view);
-                else if (n == "r_reprojected_color" || n == "rw_reprojected_color") image(reprojected.view);
-                else if (n == "r_recurrent_0" || n == "rw_recurrent_0") image(recurrent.view);
-                else if (n == "r_auto_exposure_texture") image(exposure_image.view);
-                else if (n == "rw_auto_exposure_texture") image(exposure.view);
-                else if (n == "rw_spd_global_atomic") image(spd_atomic.view);
-                else if (n == "rw_autoexp_mip_5") image(spd_mip5.view);
-                else if (n == "rw_mlsr_output_color") image(f.sharpen ? mlsr_output.view : final_output->view);
-                else if (n == "r_rcas_input") image(mlsr_output.view);
-                else if (n == "rw_rcas_output") image(final_output->view);
-                else if (n == "ScratchBuffer") buffer(scratch.buffer, 0, VK_WHOLE_SIZE);
-                else if (n == "InitializerBuffer") buffer(initializer.buffer, 0, VK_WHOLE_SIZE);
-                else if (n == "MLSR_Optimized_Constants") buffer(ubo.buffer, slot, sizeof(Mlsr));
-                else if (n == "AutoExposureSPDConstants") buffer(ubo.buffer, slot + ubo_align, sizeof(Spd));
-                else if (n == "cbRCAS") buffer(ubo.buffer, slot + 2 * ubo_align, sizeof(Rcas));
-                else if (n == "CsTensorSizes") buffer(tensor_ubo.buffer, 0, 272);
+                } else if (n == "r_input_color")
+                    image(f.color.view, f.color.layout);
+                else if (n == "r_velocity")
+                    image(f.motion.view, f.motion.layout);
+                else if (n == "r_depth")
+                    image(f.depth.view, f.depth.layout);
+                else if (n == "r_history_color" || n == "rw_history_color")
+                    image(history.view);
+                else if (n == "r_reprojected_color" || n == "rw_reprojected_color")
+                    image(reprojected.view);
+                else if (n == "r_recurrent_0" || n == "rw_recurrent_0")
+                    image(recurrent.view);
+                else if (n == "r_auto_exposure_texture")
+                    image(exposure_image.view);
+                else if (n == "rw_auto_exposure_texture")
+                    image(exposure.view);
+                else if (n == "rw_spd_global_atomic")
+                    image(spd_atomic.view);
+                else if (n == "rw_autoexp_mip_5")
+                    image(spd_mip5.view);
+                else if (n == "rw_mlsr_output_color")
+                    image(f.sharpen ? mlsr_output.view : final_output->view);
+                else if (n == "r_rcas_input")
+                    image(mlsr_output.view);
+                else if (n == "rw_rcas_output")
+                    image(final_output->view);
+                else if (n == "ScratchBuffer")
+                    buffer(scratch.buffer, 0, VK_WHOLE_SIZE);
+                else if (n == "InitializerBuffer")
+                    buffer(initializer.buffer, 0, VK_WHOLE_SIZE);
+                else if (n == "MLSR_Optimized_Constants")
+                    buffer(ubo.buffer, slot, sizeof(Mlsr));
+                else if (n == "AutoExposureSPDConstants")
+                    buffer(ubo.buffer, slot + ubo_align, sizeof(Spd));
+                else if (n == "cbRCAS")
+                    buffer(ubo.buffer, slot + 2 * ubo_align, sizeof(Rcas));
+                else if (n == "CsTensorSizes")
+                    buffer(tensor_ubo.buffer, 0, 272);
                 // FP8 passes declare debug/result views the INT8 runtime does not bind: read-only
                 // stand-ins keep the descriptor valid.
-                else if (n == "r_debug_visualization" || n == "r_result_color") image(f.color.view, f.color.layout);
+                else if (n == "r_debug_visualization" || n == "r_result_color")
+                    image(f.color.view, f.color.layout);
                 else {
                     error = name + ": unknown resource " + n;
                     return false;
@@ -818,8 +869,8 @@ struct Upscaler::Impl {
                 writes.push_back(w);
             }
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-            push_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, uint32_t(writes.size()),
-                             writes.data());
+            push_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0,
+                             uint32_t(writes.size()), writes.data());
             uint32_t gx = 1, gy = 1;
             if (const auto d = pass_dispatch.find(name); d != pass_dispatch.end()) {
                 gx = CeilDiv(aw, d->second[0]);
@@ -845,7 +896,8 @@ struct Upscaler::Impl {
                 // FP8 sets: AMD dispatches more than this rule below the tier size (captures fit a
                 // border of 33). The shader stops the extra threads, so cover the whole tier.
                 const uint32_t pw = fp8 ? tw : w, ph = fp8 ? th : h;
-                if (fp8) kx = 33, ky = 1;
+                if (fp8)
+                    kx = 33, ky = 1;
                 const uint32_t threads = (pw + 1 + kx) + ph + ph * kx + (pw + 1 + kx) * ky;
                 gx = CeilDiv(threads, p.refl.local_size[0]);
             } else {
@@ -861,8 +913,8 @@ struct Upscaler::Impl {
                 profile_pass[ring][profiled++] = uint8_t(index);
             }
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &between, 0, nullptr, 0,
-                                 nullptr);
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &between, 0, nullptr,
+                                 0, nullptr);
         }
         profile_count[ring] = profiled;
         return true;
@@ -883,8 +935,8 @@ const std::string& Upscaler::Error() const noexcept {
 }
 
 std::string Upscaler::Describe() const {
-    return impl->set + " output " + std::to_string(impl->out_w) + "x" + std::to_string(impl->out_h) +
-           (impl->fp8 ? " fp8" : "");
+    return impl->set + " output " + std::to_string(impl->out_w) + "x" +
+           std::to_string(impl->out_h) + (impl->fp8 ? " fp8" : "");
 }
 
 } // namespace Fsr411

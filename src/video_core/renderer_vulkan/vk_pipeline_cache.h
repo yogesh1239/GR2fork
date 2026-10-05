@@ -291,9 +291,9 @@ private:
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     bool object_motion_{};
-    bool motion_sel_{};      ///< MotionDraw() of the draw being resolved; read by its runtime infos
+    bool motion_sel_{}; ///< MotionDraw() of the draw being resolved; read by its runtime infos
     std::vector<const u32*> motion_vetoed_; ///< VS code whose varyings take the motion locations
-    u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+    u32 num_new_pipelines{};                // new pipelines added to the cache since the game start
     // Persistent probe object for GetProgram; rebuilt in place every lookup.
     Shader::StageSpecialization spec_scratch{};
     // Result of the previous successful graphics lookup; a repeated key skips the
