@@ -129,6 +129,8 @@ void L::DrawMenuBar() {
                 if (Checkbox("Anti-aliasing (replaces the game's)", &fsr411)) {
                     EmulatorSettings.SetFsr411Enabled(fsr411);
                 }
+                Text("Status: %s (%u FSR frames)", DebugState.Fsr411StateText(),
+                     DebugState.fsr411_frames.load(std::memory_order_relaxed));
                 int sharpness = EmulatorSettings.GetFsr411Sharpness();
                 if (SliderInt("Sharpness", &sharpness, 0, 100)) {
                     EmulatorSettings.SetFsr411Sharpness(sharpness);
@@ -413,8 +415,14 @@ void L::Draw() {
         frame_graph.AddFrame(fn, DebugState.FrameDeltaTime);
     }
 
-    if (IsKeyPressed(ImGuiKey_F10, false)) {
-        if (io.KeyCtrl) {
+    // GR2 fork: Insert also opens the menu bar, Home starts the FSR 4.1.1 test sequence (not
+    // while a text field is typed in).
+    const bool insert = IsKeyPressed(ImGuiKey_Insert, false) && !io.WantTextInput;
+    if (IsKeyPressed(ImGuiKey_Home, false) && !io.WantTextInput) {
+        DebugState.fsr411_test_request = true;
+    }
+    if (insert || IsKeyPressed(ImGuiKey_F10, false)) {
+        if (insert || io.KeyCtrl) {
             DebugState.IsShowingDebugMenuBar() ^= true;
         }
         visibility_toggled = true;

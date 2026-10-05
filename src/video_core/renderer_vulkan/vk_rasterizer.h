@@ -60,6 +60,11 @@ public:
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
+    /// A guest flip, on the GPU thread in stream order: the next scene may take the jitter.
+    void Fsr411Flip() noexcept {
+        ++fsr411_flips;
+    }
+
     void ScopeMarker(fmt::string_view fmt, fmt::format_args args, auto&& func) {
         if (host_markers_enabled) {
             ScopeMarkerBegin(fmt::vformat(fmt, args));
@@ -145,6 +150,12 @@ private:
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
 
+    void SelectDrawJitter(bool full_screen);
+    void Fsr411TestStep();
+    [[nodiscard]] u32 DynStateFlags(bool is_indexed) const noexcept {
+        return 1u | (u32(attachment_feedback_loop) << 1) | (u32(is_indexed) << 2) |
+               (draw_jitter_key_ << 3);
+    }
     bool UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed);
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
@@ -164,6 +175,8 @@ private:
     void BindIndexBuffer(u32 index_offset = 0);
 
     void ResetBindings(bool is_compute);
+    /// Runs FSR 4.1.1 in place of GR2's AA dispatch, whose resources are bound; false: run it.
+    bool RunFsr411();
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
@@ -376,7 +389,7 @@ private:
         u64 dyn_gen{};
         u64 pipe_gen{};
         const GraphicsPipeline* pipeline{}; // compared, never dereferenced
-        u32 flags{}; // 0 invalid; bit0 valid, bit1 feedback loop, bit2 indexed
+        u32 flags{}; // 0 invalid; bit0 valid, bit1 feedback loop, bit2 indexed, 3+ jitter key
         // The only pipeline field the updaters read; the stamp-lane keying
         // compares it instead of the pipeline identity.
         std::array<vk::ColorComponentFlags, AmdGpu::NUM_COLOR_BUFFERS> write_masks{};
@@ -443,6 +456,17 @@ private:
     std::atomic<u64> mapped_ranges_gen_{0};
     PipelineCache pipeline_cache;
     Fsr411Pass fsr411_pass;
+    u32 fsr411_flips{}; ///< guest flips since the last FSR frame
+    u32 fsr411_runs{};
+    VideoCore::ImageId fsr411_depth{}; ///< scene depth of the last FSR frame; null: no jitter
+    u32 fsr411_jitter_index{1};        ///< Halton index of the next scene's jitter
+    u32 fsr411_jittered_draws{};
+    u32 fsr411_depth_draws{};
+    u32 draw_jitter_key_{};   ///< fsr411_jitter_index when this draw is jittered, else 0
+    u32 fsr411_test_frame_{}; ///< AA passes into the test sequence; 0 when it is not running
+    u32 fsr411_test_mode_{};  ///< 0 normal, 1 FSR sign reversed, 2 no jitter, 3 the game's AA
+    u32 fsr411_resets{};
+    bool fsr411_shape_warned{};
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

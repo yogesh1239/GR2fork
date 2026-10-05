@@ -243,6 +243,14 @@ I can do this phase at the same time as Phase 1.
 
 **Time (my work):** 2 to 6 hours. Add 3 to 8 hours if I must make my own motion vectors.
 
+**Status (2026-10-05): the connection works, without jitter. Your test is next.**
+
+- FSR 4.1.1 now replaces the game's smoothing step when the setting is on. The game adds its glow, menus and text after it, as before.
+- Step 2 was not needed: the game's motion vectors already have a form that FSR takes with one scale number.
+- My own short test: no crash, no errors, and no broken picture. The sky brightness matches FSR off. I did not compare the same frame, so small colour changes are still possible.
+- Not done yet: the jitter (so edges stay jagged for now), and the reset on camera cuts. FSR forgets old frames only after loading screens and menus.
+- Kat and the people in the city will smear until Phase 3b.
+
 ### Phase 3b: Motion vectors for characters (required)
 
 The game draws Kat and the people in the city in a separate step, and that step makes no motion vectors. So I make them myself.

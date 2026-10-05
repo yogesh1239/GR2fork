@@ -778,8 +778,8 @@ struct Upscaler::Impl {
                 w.dstBinding = b.binding;
                 w.descriptorCount = 1;
                 w.descriptorType = b.type;
-                const auto image = [&](VkImageView view) {
-                    images.push_back({VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL});
+                const auto image = [&](VkImageView view, VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL) {
+                    images.push_back({VK_NULL_HANDLE, view, layout});
                     w.pImageInfo = &images.back();
                 };
                 const auto buffer = [&](VkBuffer buf, VkDeviceSize offset, VkDeviceSize range) {
@@ -789,9 +789,9 @@ struct Upscaler::Impl {
                 const std::string& n = b.name;
                 if (b.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
                     continue; // immutable
-                } else if (n == "r_input_color") image(f.color.view);
-                else if (n == "r_velocity") image(f.motion.view);
-                else if (n == "r_depth") image(f.depth.view);
+                } else if (n == "r_input_color") image(f.color.view, f.color.layout);
+                else if (n == "r_velocity") image(f.motion.view, f.motion.layout);
+                else if (n == "r_depth") image(f.depth.view, f.depth.layout);
                 else if (n == "r_history_color" || n == "rw_history_color") image(history.view);
                 else if (n == "r_reprojected_color" || n == "rw_reprojected_color") image(reprojected.view);
                 else if (n == "r_recurrent_0" || n == "rw_recurrent_0") image(recurrent.view);
@@ -810,7 +810,7 @@ struct Upscaler::Impl {
                 else if (n == "CsTensorSizes") buffer(tensor_ubo.buffer, 0, 272);
                 // FP8 passes declare debug/result views the INT8 runtime does not bind: read-only
                 // stand-ins keep the descriptor valid.
-                else if (n == "r_debug_visualization" || n == "r_result_color") image(f.color.view);
+                else if (n == "r_debug_visualization" || n == "r_result_color") image(f.color.view, f.color.layout);
                 else {
                     error = name + ": unknown resource " + n;
                     return false;

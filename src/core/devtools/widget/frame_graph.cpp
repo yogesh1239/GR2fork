@@ -102,7 +102,8 @@ void FrameGraph::Draw() {
              DebugState.game_resolution.second);
         Text("Output Res: %dx%d", DebugState.output_resolution.first,
              DebugState.output_resolution.second);
-        Text("FSR: %s", DebugState.is_using_fsr ? "on" : "off");
+        Text("FSR 1 upscale filter: %s", DebugState.is_using_fsr ? "on" : "off");
+        Text("FSR 4.1.1: %s", DebugState.Fsr411StateText());
     }
     End();
 }

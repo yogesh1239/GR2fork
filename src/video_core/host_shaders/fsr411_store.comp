@@ -1,0 +1,25 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D upscaled;
+layout(binding = 1) uniform sampler2D game_color;
+layout(binding = 2, rgba8) uniform writeonly image2D game_output;
+
+vec3 EncodeSrgb(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+void main() {
+    const ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pos, imageSize(game_output)))) {
+        return;
+    }
+    const vec3 rgb = texelFetch(upscaled, pos, 0).rgb;
+    const float alpha = texelFetch(game_color, pos, 0).a;
+    imageStore(game_output, pos, vec4(EncodeSrgb(rgb), alpha));
+}

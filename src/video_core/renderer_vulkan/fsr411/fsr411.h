@@ -6,8 +6,9 @@
 //
 // Plain Vulkan (no renderer types) so that the game (vk_fsr4.cpp) and the benchmark
 // (tools/fsr4_bench.cpp) share it. Frames record into the caller's command buffer; the caller
-// keeps the images in layout General and makes sure that the frame recorded kFramesInFlight
-// frames earlier has completed before recording a new one (constant buffer ring).
+// keeps the images in layout General (inputs: Image::layout) and makes sure that the frame
+// recorded kFramesInFlight frames earlier has completed before recording a new one (constant
+// buffer ring).
 
 #pragma once
 
@@ -25,6 +26,7 @@ struct Image {
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE; ///< depth: a view of the depth aspect
     uint32_t width = 0, height = 0;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL; ///< inputs: a read-only layout is valid
 };
 
 struct Frame {

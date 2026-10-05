@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <shared_mutex>
@@ -173,6 +174,19 @@ public:
     std::pair<u32, u32> game_resolution{};
     std::pair<u32, u32> output_resolution{};
     bool is_using_fsr{};
+    // FSR 4.1.1 (GR2 fork), written by the GPU thread at each AA pass: FSR frames so far, and
+    // the state of the last AA pass (see Fsr411StateText).
+    std::atomic<u32> fsr411_frames{};
+    std::atomic<u32> fsr411_state{};
+    // The Home key asks for the FSR 4.1.1 test sequence (Rasterizer::Fsr411TestStep).
+    std::atomic<bool> fsr411_test_request{};
+
+    const char* Fsr411StateText() const {
+        constexpr std::array<const char*, 4> states{
+            "waiting for the game's anti-aliasing pass", "off, the game's anti-aliasing runs",
+            "running, without jitter", "running, with jitter"};
+        return states[fsr411_state.load(std::memory_order_relaxed)];
+    }
 
     void ShowDebugMessage(std::string message) {
         if (message.empty()) {

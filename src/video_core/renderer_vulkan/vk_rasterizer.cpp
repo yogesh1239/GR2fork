@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -20,6 +21,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/region_manager.h"
 #include "video_core/buffer_cache/stream_copy_lane.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -84,6 +86,58 @@ void Rasterizer::RefreshViewportPush() {
     push_data.xscale = regs.viewport_control.xscale_enable ? regs.viewports[0].xscale : 1.f;
     push_data.yoffset = regs.viewport_control.yoffset_enable ? regs.viewports[0].yoffset : 0.f;
     push_data.yscale = regs.viewport_control.yscale_enable ? regs.viewports[0].yscale : 1.f;
+}
+
+// FSR 4.1.1 jitter in pixels (x right, y down): Halton(2, 3) with 8 phases, as bbport at 1:1.
+// Index 0 is no jitter.
+static std::array<float, 2> Fsr411Jitter(u32 index) {
+    if (index == 0) {
+        return {};
+    }
+    const auto halton = [](u32 i, u32 base) {
+        float f = 1.0f, result = 0.0f;
+        for (; i > 0; i /= base) {
+            f /= float(base);
+            result += f * float(i % base);
+        }
+        return result;
+    };
+    return {halton(index, 2) - 0.5f, halton(index, 3) - 0.5f};
+}
+
+// FSR 4.1.1: shift geometry drawn on the scene depth between a flip and the AA, by the same
+// amount for every pass of the frame (the G-buffer depth test is EQUAL against the prepass).
+// Not full-screen passes (a shifted quad would resample its input) and not clip-disabled
+// screen-space draws.
+void Rasterizer::SelectDrawJitter(bool full_screen) {
+    const bool scene = fsr411_depth && db_desc.first == fsr411_depth;
+    const bool on = scene && fsr411_flips >= 1 && fsr411_flips <= 4 && !full_screen &&
+                    fsr411_test_mode_ != 2 && !liverpool->regs.IsClipDisabled();
+    draw_jitter_key_ = on ? fsr411_jitter_index : 0;
+    fsr411_depth_draws += scene;
+    fsr411_jittered_draws += on;
+}
+
+// A comparison for a still camera, started with the Home key: the 4 test modes in a row, each
+// for 90 AA passes to settle, then 8 game-only screenshots of consecutive frames.
+void Rasterizer::Fsr411TestStep() {
+    constexpr u32 Settle = 90, Shots = 8, Modes = 4;
+    if (fsr411_test_frame_ == 0 && !DebugState.fsr411_test_request.exchange(false)) {
+        return;
+    }
+    const u32 mode = fsr411_test_frame_ / (Settle + Shots);
+    const u32 step = fsr411_test_frame_ % (Settle + Shots);
+    if (mode == Modes) {
+        LOG_INFO(Render_Vulkan, "FSR 4.1.1 test: done");
+        fsr411_test_frame_ = fsr411_test_mode_ = 0;
+        return;
+    }
+    fsr411_test_mode_ = mode;
+    if (step >= Settle) {
+        LOG_INFO(Render_Vulkan, "FSR 4.1.1 test: mode {} shot {}", mode, step - Settle);
+        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+    }
+    ++fsr411_test_frame_;
 }
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
@@ -663,9 +717,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
                             bind_image_n_);
+    SelectDrawJitter(regs.num_indices <= 6 && regs.num_instances.NumInstances() <= 1);
     // Dyn term, after the scope replay wrote attachment_feedback_loop.
     if (glue) {
-        const u32 flags = 1u | (u32(attachment_feedback_loop) << 1) | (u32(is_indexed) << 2);
+        const u32 flags = DynStateFlags(is_indexed);
         const bool dyn_ok_term =
             dyn_memo_.flags == flags &&
             scheduler.GetDynamicState().invalidate_gen == dyn_memo_.dyn_gen &&
@@ -867,6 +922,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
                             bind_image_n_);
+    SelectDrawJitter(false);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -938,16 +994,32 @@ void Rasterizer::DispatchDirect() {
         runtime.FlushBarriers();
     }
 
-    scheduler.EndRendering();
-    pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
-                            bind_image_n_);
+    constexpr u64 Gr2AaHash = 0x6f705679;
+    bool fsr = false;
+    if (cs.pgm_hash == Gr2AaHash) {
+        Fsr411TestStep();
+        fsr = EmulatorSettings.IsFsr411Enabled() && fsr411_test_mode_ != 3 && RunFsr411();
+        // No jitter while the game's AA runs (FSR off, or the guard refused the dispatch).
+        if (!fsr) {
+            fsr411_depth = {};
+        }
+        DebugState.fsr411_state.store(fsr ? 2u + (fsr411_jittered_draws != 0) : 1u,
+                                      std::memory_order_relaxed);
+        DebugState.fsr411_frames.store(fsr411_runs, std::memory_order_relaxed);
+        fsr411_jittered_draws = fsr411_depth_draws = 0;
+    }
+    if (!fsr) {
+        scheduler.EndRendering();
+        pipeline->BindResources({bind_writes_, bind_write_n_}, push_data, bind_buffer_n_,
+                                bind_image_n_);
 
-    scheduler.Record([handle = pipeline->Handle(), x = u32(cs_program.dim_x),
-                      y = u32(cs_program.dim_y),
-                      z = u32(cs_program.dim_z)](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
-        cmdbuf.dispatch(x, y, z);
-    });
+        scheduler.Record([handle = pipeline->Handle(), x = u32(cs_program.dim_x),
+                          y = u32(cs_program.dim_y),
+                          z = u32(cs_program.dim_z)](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+            cmdbuf.dispatch(x, y, z);
+        });
+    }
     DebugState.IncDispatch();
     scheduler.KickRecording();
 
@@ -956,6 +1028,98 @@ void Rasterizer::DispatchDirect() {
         copy_scope.reset();
         MaybeIntervalFlush(false);
     }
+}
+
+bool Rasterizer::RunFsr411() {
+    // GR2's AA (FXAA and a history blend): 0 color (sRGB), 1 stencil (redirected to the scene
+    // depth), 2 velocity, 3 history (unused here), 4 output (storage). The bind has already moved
+    // the inputs to read layouts behind a barrier that covers compute.
+    constexpr u32 Count = 5;
+    if (!fsr411_pass.IsAvailable() || image_bindings.n != Count || image_infos.size() < Count) {
+        return false;
+    }
+    std::array<VideoCore::Image*, Count> images;
+    for (u32 i = 0; i < Count; ++i) {
+        if (!image_bindings[i].image_id || !image_infos[i].imageView) {
+            return false;
+        }
+        images[i] = &texture_cache.GetImage(image_bindings[i].image_id);
+    }
+    if (fsr411_runs < 2) {
+        for (u32 i = 0; i < Count; ++i) {
+            const auto& info = images[i]->info;
+            LOG_INFO(Render_Vulkan,
+                     "FSR 4.1.1 AA binding {}: image {} at {:#x} {} {}x{} depth={} storage={} {}",
+                     i, image_bindings[i].image_id.index, info.guest_address,
+                     vk::to_string(info.pixel_format), info.size.width, info.size.height,
+                     info.props.is_depth != 0,
+                     image_bindings[i].desc.type == VideoCore::TextureCache::BindingType::Storage,
+                     vk::to_string(image_infos[i].imageLayout));
+        }
+    }
+    const auto& size = images[0]->info.size;
+    bool shape = !images[0]->info.props.is_depth && images[1]->info.props.is_depth &&
+                 images[2]->info.pixel_format == vk::Format::eR16G16Sfloat &&
+                 image_bindings[4].desc.type == VideoCore::TextureCache::BindingType::Storage;
+    for (const auto* image : images) {
+        shape &= image->info.size.width == size.width && image->info.size.height == size.height;
+    }
+    if (!shape) {
+        if (!fsr411_shape_warned) {
+            LOG_WARNING(Render_Vulkan, "FSR 4.1.1: the AA dispatch has unexpected bindings, "
+                                       "the game's AA runs instead");
+            fsr411_shape_warned = true;
+        }
+        return false;
+    }
+
+    VideoCore::ImageViewInfo depth_info{};
+    depth_info.format = vk::Format::eR32Sfloat; // the view gets the depth aspect
+    const auto input = [&](u32 i, vk::ImageView view) {
+        return Fsr411::Image{static_cast<VkImage>(images[i]->GetImage()),
+                             static_cast<VkImageView>(view), size.width, size.height,
+                             static_cast<VkImageLayout>(image_infos[i].imageLayout)};
+    };
+    // ponytail: a gap in flips stands for a load or a menu; camera cuts keep the history.
+    const bool reset = fsr411_runs == 0 || fsr411_flips > 4;
+    const float sharpness = EmulatorSettings.GetFsr411Sharpness() / 100.0f;
+    // The jitter the scene drew with; none on the first frame (the depth was not known yet).
+    // GR2_FSR411_INVERT_JITTER flips the sign given to FSR, for a test of the convention.
+    static const float jitter_sign = std::getenv("GR2_FSR411_INVERT_JITTER") ? -1.0f : 1.0f;
+    const auto jitter = Fsr411Jitter(fsr411_jittered_draws ? fsr411_jitter_index : 0);
+    const float sign = fsr411_test_mode_ == 1 ? -jitter_sign : jitter_sign;
+    Fsr411::Frame frame{
+        .color = input(0, image_infos[0].imageView),
+        .depth = input(1, images[1]->FindViewHandle(depth_info)),
+        .motion = input(2, image_infos[2].imageView),
+        .jitter = {sign * jitter[0], sign * jitter[1]},
+        // The game stores previous minus current in NDC, y up.
+        .motion_scale = {0.5f * size.width, -0.5f * size.height},
+        .sharpness = sharpness,
+        .sharpen = sharpness > 0.0f,
+        .reset = reset,
+    };
+    if (!fsr411_pass.RecordAa(frame, image_infos[4].imageView)) {
+        return false;
+    }
+    if (frame.reset && fsr411_resets++ < 50) {
+        LOG_INFO(Render_Vulkan, "FSR 4.1.1: history reset {} after {} flips", fsr411_resets,
+                 fsr411_flips);
+    }
+    // A check of the jitter selection: no scene-depth draws means the depth ids differ; none
+    // jittered with some on the depth means the flip window or the shape filter shut them out.
+    if (fsr411_runs < 4 || fsr411_runs % 3600 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "FSR 4.1.1: frame {} jitter ({:.4f}, {:.4f}), {} of {} scene-depth draws "
+                 "jittered, depth image {}, {} flips",
+                 fsr411_runs, frame.jitter[0], frame.jitter[1], fsr411_jittered_draws,
+                 fsr411_depth_draws, image_bindings[1].image_id.index, fsr411_flips);
+    }
+    fsr411_depth = image_bindings[1].image_id;
+    fsr411_flips = 0;
+    fsr411_jitter_index = fsr411_jitter_index % 8 + 1;
+    ++fsr411_runs;
+    return true;
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -3208,7 +3372,7 @@ bool Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
         skipcache != nullptr && skipcache->Active() && skipcache->ShouldProbe(CacheId::DynState);
     // is_indexed stays keyed: the primitive-restart ASSERT_MSG is live in
     // release builds, so an indexed transition must re-evaluate it.
-    const u32 flags = 1u | (u32(attachment_feedback_loop) << 1) | (u32(is_indexed) << 2);
+    const u32 flags = DynStateFlags(is_indexed);
     u64 dyn_stamp{}, dyn_gen{}, dyn_pipe_gen{};
     bool dyn_would_hit = false, verifying = false;
     if (probing) {
@@ -3355,8 +3519,10 @@ void Rasterizer::UpdateViewportScissorState() const {
             const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
             const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
 
-            viewport.x = xoffset - xscale;
-            viewport.y = yoffset - yscale;
+            // FSR 4.1.1: the sub-pixel jitter, the same shift as jittering the projection.
+            const auto jitter = Fsr411Jitter(draw_jitter_key_);
+            viewport.x = xoffset - xscale + jitter[0];
+            viewport.y = yoffset - yscale + jitter[1];
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
         }
