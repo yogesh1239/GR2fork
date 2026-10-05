@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -114,6 +116,40 @@ public:
         return std::exchange(fast_stats, {});
     }
 
+    /// upload_repeat_probe counters, reset on read.
+    struct UploadProbeStats {
+        bool enabled;
+        u64 uploads;
+        u64 inline_uploads; // copied on the GPU thread instead of through the copy lane
+        u64 bytes;
+        u64 ticks;                // command buffer ticks that saw an upload
+        u64 hit_last_tick;        // same bytes as the range's last upload, in the same tick
+        u64 hit_any_tick;         // same range and bytes uploaded earlier in the tick
+        u64 hit_last_frame;       // same bytes as the range's last upload, in the same frame
+        u64 hit_any_frame;        // same range and bytes uploaded earlier in the frame
+        u64 overflow;             // inserts dropped at the table cap
+        std::array<u64, 5> sizes; // <64, 64-127, 128-191, 192-1023, 1024+ bytes
+    };
+    UploadProbeStats DrainUploadProbe() {
+        auto stats = std::exchange(probe_stats, {});
+        stats.enabled = upload_repeat_probe;
+        return stats;
+    }
+
+    /// upload_dedup counters, reset on read.
+    struct UploadDedupStats {
+        bool enabled;
+        u64 hits;   // uploads skipped for an equal one earlier in the tick
+        u64 misses; // eligible uploads that went to the stream buffer
+        u64 bytes_saved;
+        u64 overflow; // uploads not remembered: shadow arena full, or a slot taken in the tick
+    };
+    UploadDedupStats DrainUploadDedup() {
+        auto stats = std::exchange(dedup_stats, {});
+        stats.enabled = upload_dedup;
+        return stats;
+    }
+
 private:
     struct ArenaBinds {
         const Buffer* arena;
@@ -170,6 +206,16 @@ private:
     /// nullopt when the range must be copied inline.
     std::optional<u64> StreamViaLane(VAddr device_addr, u32 size);
 
+    /// upload_repeat_probe: hashes the guest bytes of a stream upload and counts repeats.
+    void ProbeUpload(VAddr device_addr, u32 size, bool is_inline);
+
+    /// upload_dedup: reads the guest bytes into dedup_scratch and returns the stream buffer
+    /// offset of an equal upload earlier in the current tick, if any.
+    std::optional<u64> DedupLookup(VAddr device_addr, u32 size);
+
+    /// upload_dedup: remembers dedup_scratch as the bytes just uploaded at offset.
+    void DedupRecord(VAddr device_addr, u32 size, u64 offset);
+
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
     Vulkan::Runtime& runtime;
@@ -215,6 +261,37 @@ private:
     std::vector<u64> resident_bits;
     bool clean_sync_peek{};
     FastPathStats fast_stats{};
+
+    bool upload_repeat_probe{};
+    UploadProbeStats probe_stats{};
+    /// Probe state, GPU thread only. A range's key is its address and size; a value seeded with
+    /// the key hashes its bytes. The last upload per key is kept for the frame.
+    struct ProbeLast {
+        u64 hash;
+        u64 tick;
+    };
+    std::unordered_map<u64, ProbeLast> probe_last;
+    std::unordered_set<u64> probe_seen_tick;
+    std::unordered_set<u64> probe_seen_frame;
+    u64 probe_tick{};
+    u32 probe_frame{};
+    std::vector<u8> probe_scratch;
+
+    bool upload_dedup{};
+    UploadDedupStats dedup_stats{};
+    /// upload_dedup state, GPU thread only. A slot is live only while its tick is the current
+    /// tick; its bytes sit in dedup_shadow, a bump arena restarted when the tick changes.
+    struct DedupSlot {
+        u64 key;
+        u64 tick;
+        u64 offset;
+        u32 shadow;
+    };
+    std::vector<DedupSlot> dedup_slots;
+    std::vector<u8> dedup_shadow;
+    std::vector<u8> dedup_scratch;
+    u32 dedup_shadow_used{};
+    u64 dedup_shadow_tick{};
 
     bool readback_offload{};
     std::mutex readback_mutex;

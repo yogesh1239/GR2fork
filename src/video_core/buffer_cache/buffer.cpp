@@ -148,6 +148,17 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
             mapped_data = std::span<u8>{std::bit_cast<u8*>(alloc_info.pMappedData), size_bytes};
         }
         is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        // The first Stream buffer is the stream buffer; the GDS buffer is built after it.
+        static bool stream_logged = false;
+        if (mem_type == MemoryType::Stream && !std::exchange(stream_logged, true)) {
+            const VkPhysicalDeviceMemoryProperties* props{};
+            vmaGetMemoryProperties(instance.GetAllocator(), &props);
+            const u32 heap = props->memoryTypes[alloc_info.memoryType].heapIndex;
+            LOG_INFO(Render_Vulkan,
+                     "Stream buffer memory: type={} heap={} heap_size={}MiB flags={}",
+                     alloc_info.memoryType, heap, props->memoryHeaps[heap].size >> 20,
+                     vk::to_string(vk::MemoryPropertyFlags{property_flags}));
+        }
     }
 }
 

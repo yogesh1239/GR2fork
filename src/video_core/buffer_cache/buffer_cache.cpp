@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <magic_enum/magic_enum.hpp>
+#include <xxhash.h>
 
 #include "common/alignment.h"
 #include "common/scope_exit.h"
@@ -31,6 +32,21 @@ static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
 static constexpr u64 READBACK_WINDOW_SIZE = 512_KB;
 // Every readback window lies inside one tracker region.
 static_assert(HIGHER_PAGE_SIZE % READBACK_WINDOW_SIZE == 0);
+
+// upload_dedup. Past 1 KB the lookup's copy and compare on the GPU thread outgrow what a hit
+// saves there: a lane upload costs that thread a near constant push and a worker moves the bytes.
+static constexpr u32 DEDUP_MAX_BYTES = 1_KB;
+static constexpr u32 DEDUP_SLOT_BITS = 14;
+static constexpr u32 DEDUP_SHADOW_BYTES = 2_MB;
+
+// Guest addresses fit in 40 bits and dedup sizes in 16, so the key is exact.
+static u64 DedupKey(VAddr device_addr, u32 size) {
+    return device_addr << 16 | size;
+}
+
+static u64 DedupIndex(u64 key) {
+    return (key * 0x9E3779B97F4A7C15ULL) >> (64 - DEDUP_SLOT_BITS);
+}
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -103,6 +119,16 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
     clean_sync_peek = EmulatorSettings.IsCleanSyncPeek();
     readback_offload = EmulatorSettings.IsReadbackOffload();
+    upload_repeat_probe = EmulatorSettings.IsUploadRepeatProbe();
+    if (upload_repeat_probe) {
+        probe_scratch.resize(STREAM_THRESHOLD);
+    }
+    upload_dedup = EmulatorSettings.IsUploadDedup();
+    if (upload_dedup) {
+        dedup_slots.resize(size_t{1} << DEDUP_SLOT_BITS);
+        dedup_shadow.resize(DEDUP_SHADOW_BYTES);
+        dedup_scratch.resize(DEDUP_MAX_BYTES);
+    }
 }
 
 BufferCache::~BufferCache() = default;
@@ -326,12 +352,34 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                         bool is_written, bool is_texel_buffer) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+        const bool dedup = upload_dedup && size <= DEDUP_MAX_BYTES && liverpool->OnGpuThread();
+        if (dedup) {
+            if (const auto dedup_offset = DedupLookup(device_addr, size)) {
+                return {&stream_buffer, *dedup_offset};
+            }
+        }
         if (const auto lane_offset = StreamViaLane(device_addr, size)) {
+            if (dedup) {
+                DedupRecord(device_addr, size, *lane_offset);
+            }
+            if (upload_repeat_probe) {
+                ProbeUpload(device_addr, size, false);
+            }
             return {&stream_buffer, *lane_offset};
         }
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
-        memory->CopySparseMemory(device_addr, data, size);
+        if (dedup) {
+            std::memcpy(data, dedup_scratch.data(), size);
+        } else {
+            memory->CopySparseMemory(device_addr, data, size);
+        }
         stream_buffer.Commit();
+        if (dedup) {
+            DedupRecord(device_addr, size, offset);
+        }
+        if (upload_repeat_probe) {
+            ProbeUpload(device_addr, size, true);
+        }
         return {&stream_buffer, offset};
     }
     const u64 first_block = device_addr >> block_shift;
@@ -379,6 +427,105 @@ std::optional<u64> BufferCache::StreamViaLane(VAddr device_addr, u32 size) {
     }
     stream_buffer.Commit();
     return offset;
+}
+
+void BufferCache::ProbeUpload(VAddr device_addr, u32 size, bool is_inline) {
+    static constexpr size_t PROBE_CAP = 1 << 17;
+    if (!liverpool->OnGpuThread()) {
+        return;
+    }
+    // Read after the upload: Map can flush and move to the next tick.
+    const u64 tick = scheduler.CurrentTick();
+    const u32 frame = DebugState.GetFrameNum();
+    auto& st = probe_stats;
+    if (tick != probe_tick) {
+        probe_tick = tick;
+        probe_seen_tick.clear();
+        ++st.ticks;
+    }
+    if (frame != probe_frame) {
+        probe_frame = frame;
+        probe_seen_frame.clear();
+        probe_last.clear();
+    }
+    // Hash the guest copy; the mapped destination is slow to read. Guest addresses fit in 40
+    // bits and sizes in 15, so the key is exact.
+    // ponytail: a 64-bit hash false match is negligible for a statistic, so no byte compare.
+    memory->CopySparseMemory(device_addr, probe_scratch.data(), size);
+    const u64 key = device_addr << 16 | size;
+    const u64 hash = XXH3_64bits_withSeed(probe_scratch.data(), size, key);
+    ++st.uploads;
+    st.inline_uploads += is_inline;
+    st.bytes += size;
+    ++st.sizes[size < 64 ? 0 : size < 128 ? 1 : size < 192 ? 2 : size < 1024 ? 3 : 4];
+    if (const auto it = probe_last.find(key); it != probe_last.end()) {
+        if (it->second.hash == hash) {
+            ++st.hit_last_frame;
+            st.hit_last_tick += it->second.tick == tick;
+        }
+        it->second = {hash, tick};
+    } else if (probe_last.size() < PROBE_CAP) {
+        probe_last.emplace(key, ProbeLast{hash, tick});
+    } else {
+        ++st.overflow;
+    }
+    const auto seen = [&](std::unordered_set<u64>& set, u64& hits) {
+        if (set.contains(hash)) {
+            ++hits;
+        } else if (set.size() < PROBE_CAP) {
+            set.insert(hash);
+        } else {
+            ++st.overflow;
+        }
+    };
+    seen(probe_seen_tick, st.hit_any_tick);
+    seen(probe_seen_frame, st.hit_any_frame);
+}
+
+std::optional<u64> BufferCache::DedupLookup(VAddr device_addr, u32 size) {
+    // A stream region is mapped again only after Map waits on the tick that wrote it, and a wait
+    // on the current tick submits it first (Scheduler::Wait), so a region written in this tick
+    // keeps its bytes until the tick changes. Lane jobs write only their own region and drain at
+    // that submit.
+    // ponytail: the shadow is this thread's read, not the lane worker's later one; a guest write
+    // that restores the old bytes between the two in one tick goes unseen, like any racing write.
+    memory->CopySparseMemory(device_addr, dedup_scratch.data(), size);
+    const u64 key = DedupKey(device_addr, size);
+    const auto& slot = dedup_slots[DedupIndex(key)];
+    if (slot.tick == scheduler.CurrentTick() && slot.key == key &&
+        std::memcmp(dedup_shadow.data() + slot.shadow, dedup_scratch.data(), size) == 0) {
+        ++dedup_stats.hits;
+        dedup_stats.bytes_saved += size;
+        return slot.offset;
+    }
+    ++dedup_stats.misses;
+    return std::nullopt;
+}
+
+void BufferCache::DedupRecord(VAddr device_addr, u32 size, u64 offset) {
+    // Read after the upload: Map can flush and move to the next tick.
+    const u64 tick = scheduler.CurrentTick();
+    if (tick != dedup_shadow_tick) {
+        dedup_shadow_tick = tick;
+        dedup_shadow_used = 0;
+    }
+    const u64 key = DedupKey(device_addr, size);
+    auto& slot = dedup_slots[DedupIndex(key)];
+    if (slot.tick != tick || slot.key != key) {
+        if (dedup_shadow_used + size > dedup_shadow.size()) {
+            ++dedup_stats.overflow;
+            return;
+        }
+        // ponytail: direct mapped, so a range evicts another of this tick on its slot; add ways
+        // if overflow climbs.
+        dedup_stats.overflow += slot.tick == tick;
+        slot.key = key;
+        slot.shadow = dedup_shadow_used;
+        dedup_shadow_used += size;
+    }
+    slot.tick = tick;
+    slot.offset = offset;
+    std::memcpy(dedup_shadow.data() + slot.shadow, dedup_scratch.data(), size);
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {

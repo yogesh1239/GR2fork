@@ -1099,6 +1099,20 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
                  rec.syncs, ms(rec.sync_ticks), rec.blocked, rec.chunks, rec.kicks, rec.forced,
                  sites);
     }
+    if (const auto up = buffer_cache.DrainUploadProbe(); up.enabled) {
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] UPLOADPROBE uploads={} inline={} bytes={} ticks={} "
+                 "hit_last_tick={} hit_any_tick={} hit_last_frame={} hit_any_frame={} "
+                 "overflow={} sizes=<64:{},64-127:{},128-191:{},192-1K:{},1K+:{} per300f",
+                 up.uploads, up.inline_uploads, up.bytes, up.ticks, up.hit_last_tick,
+                 up.hit_any_tick, up.hit_last_frame, up.hit_any_frame, up.overflow, up.sizes[0],
+                 up.sizes[1], up.sizes[2], up.sizes[3], up.sizes[4]);
+    }
+    if (const auto dd = buffer_cache.DrainUploadDedup(); dd.enabled) {
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] UPLOADDEDUP hits={} misses={} bytes_saved={} overflow={} per300f",
+                 dd.hits, dd.misses, dd.bytes_saved, dd.overflow);
+    }
     if (tracker_lock_spin_) {
         const auto tl = VideoCore::RegionLock::Drain();
         LOG_INFO(Render_Skipcache,

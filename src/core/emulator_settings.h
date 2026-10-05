@@ -480,6 +480,13 @@ struct GPUSettings {
     // thread waits and writes the bytes back. A GPU write marked in the window meanwhile keeps
     // the window GPU modified for the next fault.
     Setting<bool> readback_offload{false};
+    // Count how often a small read-only stream upload repeats the same bytes at the same address
+    // within a tick or a frame, logged with the SkipCache telemetry. Measurement only.
+    Setting<bool> upload_repeat_probe{false};
+    // Reuse the stream buffer copy of a small read-only upload when the same range was uploaded
+    // earlier in the same command buffer and its guest bytes are unchanged. Logged with the
+    // SkipCache telemetry as UPLOADDEDUP.
+    Setting<bool> upload_dedup{false};
     // Flush the open graphics batch early when it already holds this many draws and every batch
     // submitted so far has retired (the ring runs dry while the rest of the batch is recorded).
     // Rounded up to a multiple of 32, and ignored unless flush_draw_interval is set larger than
@@ -744,6 +751,8 @@ struct GPUSettings {
             GPU_OVERRIDE(stream_barrier_skip),
             GPU_OVERRIDE(clean_sync_peek),
             GPU_OVERRIDE(readback_offload),
+            GPU_OVERRIDE(upload_repeat_probe),
+            GPU_OVERRIDE(upload_dedup),
             GPU_OVERRIDE(ring_drain_flush_draws),
             GPU_OVERRIDE(pending_pop_throttle),
             GPU_OVERRIDE(stream_copy_workers),
@@ -835,7 +844,8 @@ struct GPUSettings {
     runtime_info_stamp_gate, userfaultfd, gpu_thread_core_reserve, one_thread_per_core, \
     vertex_layout_memo, covered_range_skip, residency_bitmap, \
     readback_linear_images_async, inline_fetch_shader, stream_barrier_skip, \
-    clean_sync_peek, readback_offload, vk_record_thread, vk_record_kick_kb
+    clean_sync_peek, readback_offload, vk_record_thread, vk_record_kick_kb, \
+    upload_repeat_probe, upload_dedup
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1150,6 +1160,8 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, StreamBarrierSkip, stream_barrier_skip)
     SETTING_FORWARD_BOOL(m_gpu, CleanSyncPeek, clean_sync_peek)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackOffload, readback_offload)
+    SETTING_FORWARD_BOOL(m_gpu, UploadRepeatProbe, upload_repeat_probe)
+    SETTING_FORWARD_BOOL(m_gpu, UploadDedup, upload_dedup)
     SETTING_FORWARD(m_gpu, RingDrainFlushDraws, ring_drain_flush_draws)
     SETTING_FORWARD(m_gpu, PendingPopThrottle, pending_pop_throttle)
     SETTING_FORWARD(m_gpu, StreamCopyWorkers, stream_copy_workers)
