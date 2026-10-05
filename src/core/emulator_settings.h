@@ -462,7 +462,7 @@ struct GPUSettings {
     Setting<bool> covered_range_skip{true};
     // Record Vulkan commands on a separate thread (shadPS4:VkRecorder). The GPU command thread
     // queues them and waits for the thread before each submit. Read once at start.
-    Setting<bool> vk_record_thread{false};
+    Setting<bool> vk_record_thread{true};
     // KiB of queued commands that the GPU command thread collects before it hands them to the
     // recording thread at the end of a draw. A submit hands over the rest. Read once at start.
     Setting<u32> vk_record_kick_kb{8};
